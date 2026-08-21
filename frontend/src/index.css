@@ -1,0 +1,214 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* --------------------------------------------------------------------------
+   디자인 토큰
+   뉴트럴 니어블랙 위에 시안 한 가지를 인터페이스 액센트로 쓴다.
+   등락은 국내 시장 관례를 따라 상승 적색 / 하락 청색으로 표기한다.
+   -------------------------------------------------------------------------- */
+:root {
+  --ink-rgb: 10 10 12;
+  --surface-rgb: 20 20 23;
+  --raise-rgb: 28 28 33;
+  --line-rgb: 39 39 45;
+  --text-rgb: 237 237 240;
+  --muted-rgb: 138 138 149;
+  --brand-rgb: 34 211 238;
+  --indigo-rgb: 85 102 245;
+  --up-rgb: 240 69 79;
+  --down-rgb: 74 134 255;
+  --brand-dim: #155e6b;
+  --grid: #1e1e23;
+  color-scheme: dark;
+}
+
+html.light {
+  --ink-rgb: 244 244 246;
+  --surface-rgb: 255 255 255;
+  --raise-rgb: 247 247 249;
+  --line-rgb: 228 228 233;
+  --text-rgb: 13 13 16;
+  --muted-rgb: 107 107 118;
+  --brand-rgb: 11 147 168;
+  --indigo-rgb: 68 83 216;
+  --up-rgb: 224 43 57;
+  --down-rgb: 26 99 216;
+  --brand-dim: #a5dfe8;
+  --grid: #eeeef2;
+  color-scheme: light;
+}
+
+/* 원시 CSS(차트 등)에서 바로 쓰는 별칭 */
+:root,
+html.light {
+  --ink: rgb(var(--ink-rgb));
+  --surface: rgb(var(--surface-rgb));
+  --raise: rgb(var(--raise-rgb));
+  --line: rgb(var(--line-rgb));
+  --text: rgb(var(--text-rgb));
+  --muted: rgb(var(--muted-rgb));
+  --brand: rgb(var(--brand-rgb));
+  --indigo: rgb(var(--indigo-rgb));
+  --up: rgb(var(--up-rgb));
+  --down: rgb(var(--down-rgb));
+}
+
+* {
+  border-color: var(--line);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--text);
+  font-family: "IBM Plex Sans KR", system-ui, sans-serif;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 1;
+}
+
+/* 숫자는 항상 등폭 + 고정폭 숫자 */
+.num {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 10.5px;
+  line-height: 1;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* 카드 상단의 얇은 광택선 — 어두운 면끼리 겹칠 때 경계를 만들어 준다 */
+.sheen {
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    rgba(255, 255, 255, 0.07) 18%,
+    rgba(255, 255, 255, 0.07) 82%,
+    transparent
+  );
+}
+html.light .sheen {
+  background: linear-gradient(to right, transparent, var(--line) 20%, var(--line) 80%, transparent);
+}
+
+/* 큰 금액 조판: 정수부는 크게, 단위·소수부는 작게 */
+.amount {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  font-weight: 500;
+}
+.amount .unit {
+  font-size: 0.56em;
+  letter-spacing: 0;
+  opacity: 0.66;
+  margin-left: 0.12em;
+  font-weight: 400;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+input,
+select,
+textarea,
+button {
+  font-family: inherit;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 2px;
+  background: var(--line);
+  border-radius: 99px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 99px;
+  background: var(--brand);
+  cursor: pointer;
+  border: 3px solid var(--surface);
+  box-shadow: 0 0 0 1px var(--brand);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 99px;
+  background: var(--brand);
+  cursor: pointer;
+  border: 3px solid var(--surface);
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+}
+.live-dot {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 0.42s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
