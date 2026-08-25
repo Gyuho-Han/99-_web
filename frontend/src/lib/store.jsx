@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { api, setToken, setUnauthorizedHandler } from "./api";
+import { api, setMarket as setApiMarket, setToken, setUnauthorizedHandler } from "./api";
+import { setCurrency } from "./format";
 
 const AppContext = createContext(null);
 export const useApp = () => useContext(AppContext);
@@ -34,6 +35,7 @@ export function AppProvider({ children }) {
   const [session, setSession] = useState(null);
   const [ready, setReady] = useState(false);
   const [env, setEnvState] = useState(() => store.get("kairo.env") || "paper");
+  const [market, setMarketState] = useState(() => store.get("kairo.market") || "kr");
   const [theme, setTheme] = useState(() => store.get("kairo.theme") || "dark");
   const [toasts, setToasts] = useState([]);
 
@@ -70,6 +72,20 @@ export function AppProvider({ children }) {
     store.set("kairo.env", next);
   }, []);
 
+  const setMarket = useCallback((next) => {
+    const m = next === "us" ? "us" : "kr";
+    setMarketState(m);
+    store.set("kairo.market", m);
+    setApiMarket(m);                                 // 이후 모든 요청에 실린다
+    setCurrency(m === "us" ? "USD" : "KRW");         // 금액 표기도 함께 바꾼다
+  }, []);
+
+  // 새로고침으로 되살아난 시장 값을 api/포맷터에도 즉시 반영한다.
+  useEffect(() => {
+    setApiMarket(market);
+    setCurrency(market === "us" ? "USD" : "KRW");
+  }, [market]);
+
   useEffect(() => {
     setUnauthorizedHandler(logout);
   }, [logout]);
@@ -98,16 +114,25 @@ export function AppProvider({ children }) {
     () => ({
       session, ready, login, signup, logout,
       env, setEnv, isLive: env === "live",
+      market, setMarket, isUS: market === "us",
+      currency: market === "us" ? "USD" : "KRW",
       theme, setTheme, toast, toasts,
     }),
-    [session, ready, login, signup, logout, env, setEnv, theme, toast, toasts],
+    [session, ready, login, signup, logout, env, setEnv, market, setMarket, theme, toast, toasts],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }
 
-/** 데이터 로딩 헬퍼. env가 바뀌면 자동으로 다시 부른다. */
+/** 데이터 로딩 헬퍼. env나 시장(kr/us)이 바뀌면 자동으로 다시 부른다.
+ *
+ *  시장은 요청 파라미터에 api.js가 알아서 실어 주므로 각 화면은 넘길 필요가 없다.
+ *  다만 재조회는 해야 하므로 여기서 의존성에 끼워 넣는다. 덕분에 화면 코드는
+ *  한 줄도 바뀌지 않는다.
+ */
 export function useAsync(fn, deps = [], { interval } = {}) {
+  const ctx = useContext(AppContext);
+  const market = ctx?.market ?? "kr";
   const [state, setState] = useState({ data: null, error: null, loading: true });
   const [nonce, setNonce] = useState(0);
   const reload = useCallback(() => setNonce((n) => n + 1), []);
@@ -122,7 +147,7 @@ export function useAsync(fn, deps = [], { interval } = {}) {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, nonce]);
+  }, [...deps, market, nonce]);
 
   useEffect(() => {
     if (!interval) return;

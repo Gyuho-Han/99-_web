@@ -1,8 +1,13 @@
 """ORM 모델.
 
-계좌 환경(env)은 'paper'(모의투자) / 'live'(실계좌) 두 가지이며,
-포지션·주문·에이전트 설정·일별 스냅샷 모두 env로 분리 저장된다.
-따라서 화면 상단 토글 하나로 두 환경을 완전히 독립적으로 볼 수 있다.
+거래 데이터는 두 축으로 분리 저장된다.
+
+  env    — 'paper'(모의투자) / 'live'(실계좌)
+  market — 'kr'(국내주식) / 'us'(미국주식)
+
+포지션·주문·에이전트 설정·신호·일별 스냅샷·예수금 모두 (user, env, market)
+조합으로 나뉘므로, 화면 상단의 환경 토글과 시장 토글 두 개로 네 가지 조합을
+완전히 독립적으로 볼 수 있다.
 """
 
 from __future__ import annotations
@@ -34,6 +39,13 @@ def utcnow() -> datetime:
 class Env(str, enum.Enum):
     paper = "paper"
     live = "live"
+
+
+class Market(str, enum.Enum):
+    """거래 시장. 통화·거래시간·증권사 어댑터가 이 값으로 갈린다."""
+
+    kr = "kr"   # 국내주식 (KRW)
+    us = "us"   # 미국주식 (USD)
 
 
 class Side(str, enum.Enum):
@@ -73,12 +85,13 @@ class BrokerCredential(Base):
     """증권사 API 자격증명. app_secret과 계좌번호는 암호화 저장한다."""
 
     __tablename__ = "broker_credentials"
-    __table_args__ = (UniqueConstraint("user_id", "broker", "env", name="uq_cred"),)
+    __table_args__ = (UniqueConstraint("user_id", "broker", "env", "market", name="uq_cred"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     broker: Mapped[str] = mapped_column(String(32), default="kis")
     env: Mapped[Env] = mapped_column(Enum(Env), default=Env.paper)
+    market: Mapped[Market] = mapped_column(Enum(Market), default=Market.kr, index=True)
     label: Mapped[str] = mapped_column(String(80), default="")
 
     app_key_enc: Mapped[str] = mapped_column(Text)
@@ -96,11 +109,12 @@ class BrokerCredential(Base):
 
 class Position(Base):
     __tablename__ = "positions"
-    __table_args__ = (UniqueConstraint("user_id", "env", "symbol", name="uq_position"),)
+    __table_args__ = (UniqueConstraint("user_id", "env", "market", "symbol", name="uq_position"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     env: Mapped[Env] = mapped_column(Enum(Env), default=Env.paper, index=True)
+    market: Mapped[Market] = mapped_column(Enum(Market), default=Market.kr, index=True)
     symbol: Mapped[str] = mapped_column(String(20), index=True)
     name: Mapped[str] = mapped_column(String(80), default="")
     quantity: Mapped[int] = mapped_column(Integer, default=0)
@@ -114,6 +128,7 @@ class Order(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     env: Mapped[Env] = mapped_column(Enum(Env), default=Env.paper, index=True)
+    market: Mapped[Market] = mapped_column(Enum(Market), default=Market.kr, index=True)
 
     broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     symbol: Mapped[str] = mapped_column(String(20), index=True)
@@ -140,11 +155,12 @@ class AgentConfig(Base):
     """자동매매 실행 설정 및 리스크 한도."""
 
     __tablename__ = "agent_configs"
-    __table_args__ = (UniqueConstraint("user_id", "env", name="uq_agent_cfg"),)
+    __table_args__ = (UniqueConstraint("user_id", "env", "market", name="uq_agent_cfg"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     env: Mapped[Env] = mapped_column(Enum(Env), default=Env.paper, index=True)
+    market: Mapped[Market] = mapped_column(Enum(Market), default=Market.kr, index=True)
 
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     model_name: Mapped[str] = mapped_column(String(64), default="ppo-ensemble-v0")
@@ -168,6 +184,7 @@ class AgentSignal(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     env: Mapped[Env] = mapped_column(Enum(Env), default=Env.paper, index=True)
+    market: Mapped[Market] = mapped_column(Enum(Market), default=Market.kr, index=True)
     symbol: Mapped[str] = mapped_column(String(20), index=True)
     action: Mapped[AgentAction] = mapped_column(Enum(AgentAction))
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
@@ -184,11 +201,12 @@ class EquitySnapshot(Base):
     """일별 자산 스냅샷. 수익곡선·MDD·Sharpe 계산의 원천."""
 
     __tablename__ = "equity_snapshots"
-    __table_args__ = (UniqueConstraint("user_id", "env", "date", name="uq_equity"),)
+    __table_args__ = (UniqueConstraint("user_id", "env", "market", "date", name="uq_equity"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     env: Mapped[Env] = mapped_column(Enum(Env), default=Env.paper, index=True)
+    market: Mapped[Market] = mapped_column(Enum(Market), default=Market.kr, index=True)
     date: Mapped[date] = mapped_column(Date, index=True)
 
     cash: Mapped[float] = mapped_column(Float, default=0.0)
@@ -211,10 +229,11 @@ class AuditLog(Base):
 
 class CashAccount(Base):
     __tablename__ = "cash_accounts"
-    __table_args__ = (UniqueConstraint("user_id", "env", name="uq_cash"),)
+    __table_args__ = (UniqueConstraint("user_id", "env", "market", name="uq_cash"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     env: Mapped[Env] = mapped_column(Enum(Env), default=Env.paper, index=True)
+    market: Mapped[Market] = mapped_column(Enum(Market), default=Market.kr, index=True)
     cash: Mapped[float] = mapped_column(Float, default=10_000_000)
     deposit_total: Mapped[float] = mapped_column(Float, default=10_000_000)

@@ -6,17 +6,31 @@ from sqlalchemy.orm import Session
 from app.api.deps import current_user
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
-from app.models import AgentConfig, CashAccount, Env, User
+from app.models import AgentConfig, CashAccount, Env, Market, User
 from app.schemas import LoginIn, SignupIn, TokenOut, UserOut
+from app.services.seed import MARKET_DEFAULTS, START_EQUITY, US_START_EQUITY
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _bootstrap(db: Session, user: User) -> None:
-    """신규 계정에 두 환경(모의/실계좌)의 기본 설정을 만들어 둔다."""
+    """신규 계정에 (모의/실계좌) × (국내/미국) 네 조합의 기본 설정을 만들어 둔다."""
     for env in (Env.paper, Env.live):
-        db.add(CashAccount(user_id=user.id, env=env))
-        db.add(AgentConfig(user_id=user.id, env=env, universe="005930,000660,035420"))
+        for mkt in (Market.kr, Market.us):
+            seed_cash = US_START_EQUITY if mkt == Market.us else START_EQUITY
+            universe, start, end = MARKET_DEFAULTS[mkt]
+            db.add(
+                CashAccount(
+                    user_id=user.id, env=env, market=mkt,
+                    cash=seed_cash, deposit_total=seed_cash,
+                )
+            )
+            db.add(
+                AgentConfig(
+                    user_id=user.id, env=env, market=mkt,
+                    universe=universe, trading_start=start, trading_end=end,
+                )
+            )
     db.commit()
 
 

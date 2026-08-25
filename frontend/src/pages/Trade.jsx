@@ -25,6 +25,14 @@ export default function Trade() {
   }, [quote.data, price]);
   useEffect(() => setPrice(""), [symbol]);
 
+  // 시장을 바꾸면 종목 코드 체계가 달라진다(005930 ↔ AAPL).
+  // 새 유니버스가 도착하면 그 시장의 첫 종목으로 옮겨 준다.
+  useEffect(() => {
+    const list = universe.data;
+    if (!list?.length) return;
+    if (!list.some((u) => u.symbol === symbol)) setSymbol(list[0].symbol);
+  }, [universe.data, symbol]);
+
   const q = quote.data;
   const held = account.data?.holdings.find((h) => h.symbol === symbol);
   const effPrice = orderType === "market" ? q?.price ?? 0 : Number(price || 0);

@@ -55,9 +55,27 @@ class Settings(BaseSettings):
     kis_market_data: bool = True      # False면 키가 있어도 시뮬레이터 시세를 쓴다
     kis_market_use_paper: bool = False  # 시세 조회 도메인. 기본은 실전.
 
+    # ------------------------------------------------------------------
+    # 미국주식 (KIS 해외주식 API)
+    #
+    # 앱키는 국내와 같은 것을 쓴다. 추가로 발급받을 키는 없다.
+    # 다만 잔고·주문까지 붙이려면 해외주식 계좌번호가 따로 필요하고,
+    # 미국 실시간 시세는 KIS에서 별도 신청해야 한다(신청 전에는 지연시세).
+    # ------------------------------------------------------------------
+    kis_overseas_account_no: str = ""   # 예: 50123456-01 (해외주식 계좌)
+    us_market_data: bool = True         # False면 미국도 시뮬레이터 시세를 쓴다
+    us_default_exchange: str = "NAS"    # NAS(나스닥) · NYS(뉴욕) · AMS(아멕스)
+    usd_krw_rate: float = 0.0           # 0이면 환산하지 않고 USD 그대로 표기한다
+
     # 시세 캐시 TTL(초). KIS는 초당 요청수 제한이 있어 반드시 캐시한다.
     quote_cache_seconds: int = 3
     candle_cache_seconds: int = 300
+
+    # KIS 호출 타임아웃(초). 화면이 멈추지 않으려면 짧아야 한다.
+    kis_timeout_seconds: float = 4.0
+    # 접근토큰 발급에 실패하면 이 시간 동안은 KIS를 다시 두드리지 않는다.
+    # (KIS는 토큰 발급 자체에도 횟수 제한이 있어, 실패를 반복하면 더 오래 막힌다)
+    kis_token_retry_seconds: int = 60
 
     # 에이전트 루프 주기(초). 데모에서는 짧게, 운영에서는 캔들 주기에 맞춘다.
     agent_tick_seconds: int = 5
@@ -69,9 +87,18 @@ class Settings(BaseSettings):
     ]
 
     @property
+    def kis_keys_present(self) -> bool:
+        return bool(self.kis_app_key and self.kis_app_secret)
+
+    @property
     def kis_market_ready(self) -> bool:
-        """.env 앱키로 실시세를 붙일 수 있는 상태인지."""
-        return bool(self.kis_market_data and self.kis_app_key and self.kis_app_secret)
+        """.env 앱키로 국내 실시세를 붙일 수 있는 상태인지."""
+        return bool(self.kis_market_data and self.kis_keys_present)
+
+    @property
+    def us_market_ready(self) -> bool:
+        """.env 앱키로 미국 실시세를 붙일 수 있는 상태인지. 앱키는 국내와 공용이다."""
+        return bool(self.us_market_data and self.kis_keys_present)
 
 
 @lru_cache

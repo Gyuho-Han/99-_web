@@ -134,7 +134,7 @@ function Mark({ withText = true }) {
 }
 
 function TopBar({ title }) {
-  const { session, logout, env, setEnv, theme, setTheme } = useApp();
+  const { session, logout, env, setEnv, market, setMarket, theme, setTheme } = useApp();
   const [menu, setMenu] = useState(false);
   return (
     <header className="sticky top-0 z-30 h-[60px] shrink-0 border-b border-line bg-ink/90 backdrop-blur-md">
@@ -144,8 +144,9 @@ function TopBar({ title }) {
           <h1 className="text-[15px] font-semibold tracking-[-0.01em] truncate">{title}</h1>
         </div>
         <div className="flex items-center gap-2">
-          <DataSourceBadge env={env} />
+          <DataSourceBadge env={env} market={market} />
           <SearchBox />
+          {!DEMO && <MarketSwitch market={market} setMarket={setMarket} />}
           <EnvSwitch env={env} setEnv={setEnv} />
           <button
             onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
@@ -182,7 +183,7 @@ function TopBar({ title }) {
 }
 
 /** 시세가 실제 KIS에서 오는지 시뮬레이터에서 오는지 한눈에 보여 준다. */
-function DataSourceBadge({ env }) {
+function DataSourceBadge({ env, market }) {
   const [info, setInfo] = useState(null);
 
   useEffect(() => {
@@ -198,20 +199,25 @@ function DataSourceBadge({ env }) {
       alive = false;
       clearInterval(t);
     };
-  }, [env]);
+  }, [env, market]);
 
   if (!info) return null;
 
   const live = info.source === "kis";
+  const 시장 = market === "us" ? "미국" : "국내";
   const label = live ? "실시세" : "시뮬레이터";
   const title = live
     ? info.account_linked
-      ? "KIS 실계좌 연동 — 시세·잔고·주문 모두 실제입니다."
-      : "KIS 실시세 — 가격은 실제, 잔고와 체결은 시뮬레이터입니다."
+      ? `KIS ${시장} 실계좌 연동 — 시세·잔고·주문 모두 실제입니다.`
+      : `KIS ${시장} 실시세 — 가격은 실제, 잔고와 체결은 시뮬레이터입니다.`
     : info.degraded
-      ? "KIS 조회에 연속 실패해 잠시 시뮬레이터 시세로 동작합니다."
+      ? `KIS ${시장} 조회 실패로 시뮬레이터 시세로 동작합니다.` +
+        (info.last_error ? `\n사유: ${info.last_error}` : "") +
+        (info.retry_in ? `\n${info.retry_in}초 뒤 다시 시도합니다.` : "")
       : info.configured
-        ? "실시세가 꺼져 있습니다 (KIS_MARKET_DATA=false)."
+        ? market === "us"
+          ? "미국 실시세가 꺼져 있습니다 (US_MARKET_DATA=false)."
+          : "실시세가 꺼져 있습니다 (KIS_MARKET_DATA=false)."
         : "backend/.env 에 KIS_APP_KEY / KIS_APP_SECRET 를 넣으면 실시세로 바뀝니다.";
 
   return (
@@ -257,6 +263,37 @@ function SearchBox() {
         <Command size={9} />K
       </kbd>
     </label>
+  );
+}
+
+function MarketSwitch({ market, setMarket }) {
+  return (
+    <div
+      className="flex items-center h-[34px] p-0.5 rounded-full border border-line bg-surface"
+      role="group"
+      aria-label="거래 시장"
+    >
+      {[
+        ["kr", "한국", "KRW"],
+        ["us", "미국", "USD"],
+      ].map(([value, label, cur]) => {
+        const active = market === value;
+        return (
+          <button
+            key={value}
+            onClick={() => setMarket(value)}
+            aria-pressed={active}
+            title={`${label} 시장 (${cur})`}
+            className={cx(
+              "h-[30px] px-3 rounded-full text-[12px] font-medium transition-colors",
+              active ? "bg-raise text-body" : "text-muted hover:text-body",
+            )}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

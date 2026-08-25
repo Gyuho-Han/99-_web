@@ -7,9 +7,18 @@ export const DEMO = import.meta.env.VITE_DEMO === "1";
 
 let token = null;
 let onUnauthorized = () => {};
+let market = "kr";
 
 export function setToken(t) {
   token = t;
+}
+
+/** 현재 시장(kr|us). 모든 요청에 자동으로 실린다. */
+export function setMarket(m) {
+  market = m === "us" ? "us" : "kr";
+}
+export function getMarket() {
+  return market;
 }
 export function setUnauthorizedHandler(fn) {
   onUnauthorized = fn;
@@ -17,6 +26,8 @@ export function setUnauthorizedHandler(fn) {
 
 async function request(path, { method = "GET", body, params } = {}) {
   const url = new URL(BASE + path, window.location.origin);
+  // 시장은 전역 상태라 매 호출마다 넘기지 않고 여기서 한 번에 붙인다.
+  url.searchParams.set("market", market);
   if (params) {
     Object.entries(params).forEach(([k, v]) => {
       if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);

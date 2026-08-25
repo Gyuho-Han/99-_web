@@ -37,16 +37,18 @@ class UserOut(BaseModel):
 class CredentialIn(BaseModel):
     broker: Literal["kis"] = "kis"
     env: Literal["paper", "live"]
+    market: Literal["kr", "us"] = "kr"
     label: str = ""
     app_key: str = Field(min_length=8)
     app_secret: str = Field(min_length=8)
-    account_no: str = Field(min_length=8, description="예: 50123456-01")
+    account_no: str = Field(min_length=8, description="국내는 종합계좌, 미국은 해외주식 계좌. 예: 50123456-01")
 
 
 class CredentialOut(BaseModel):
     id: int
     broker: str
     env: str
+    market: str
     label: str
     app_key_masked: str
     account_no_masked: str
@@ -65,6 +67,8 @@ class VerifyOut(BaseModel):
 class QuoteOut(BaseModel):
     symbol: str
     name: str
+    currency: str = "KRW"
+    exchange: str = ""
     price: float
     prev_close: float
     change: float
@@ -100,6 +104,8 @@ class HoldingOut(BaseModel):
 
 class AccountOut(BaseModel):
     env: str
+    market: str
+    currency: str
     connected: bool
     broker: str
     cash: float
@@ -162,6 +168,8 @@ class EquityPoint(BaseModel):
 
 class PerformanceOut(BaseModel):
     env: str
+    market: str
+    currency: str
     metrics: dict
     benchmark_metrics: dict
     curve: list[EquityPoint]
@@ -183,6 +191,7 @@ class AgentConfigIn(BaseModel):
 
 class AgentConfigOut(BaseModel):
     env: str
+    market: str
     enabled: bool
     model_name: str
     available_models: list[str]

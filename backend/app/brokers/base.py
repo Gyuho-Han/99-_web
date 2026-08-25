@@ -23,6 +23,8 @@ class Quote:
     low: float
     volume: int
     ts: datetime
+    currency: str = "KRW"      # KRW(국내) | USD(미국)
+    exchange: str = ""         # 미국주식일 때 NAS · NYS · AMS
 
     @property
     def change(self) -> float:
@@ -68,6 +70,7 @@ class BalanceItem:
 class Balance:
     cash: float
     holdings: list[BalanceItem] = field(default_factory=list)
+    currency: str = "KRW"
 
     @property
     def holdings_value(self) -> float:
@@ -88,9 +91,14 @@ class OrderResult:
 
 
 class BrokerAdapter(ABC):
-    """모든 증권사 어댑터가 구현해야 하는 계약."""
+    """모든 증권사 어댑터가 구현해야 하는 계약.
+
+    국내주식과 미국주식은 통화·거래시간·엔드포인트가 다르지만 이 인터페이스는
+    같다. 시장별 차이는 어댑터 구현체 안에서 흡수한다.
+    """
 
     name: str = "base"
+    currency: str = "KRW"
 
     @abstractmethod
     def verify(self) -> tuple[bool, str]:

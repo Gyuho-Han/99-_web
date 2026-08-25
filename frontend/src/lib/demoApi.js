@@ -414,11 +414,13 @@ const maskOf = (v, head = 4, tail = 4) =>
 /* ------------------------------- 공개 API ------------------------------- */
 export const demoApi = {
   marketStatus: async () => ({
+    market: "kr",
     source: "simulator",
     configured: false,
     enabled: false,
     degraded: false,
     account_linked: false,
+    currency: "KRW",
   }),
   login: async () => delay({ access_token: "demo", user: { id: 1, email: "demo@kairo.dev", name: "데모 계정" } }),
   signup: async (p) => delay({ access_token: "demo", user: { id: 1, email: p.email, name: p.name } }),

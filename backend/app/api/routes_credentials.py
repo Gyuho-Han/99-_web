@@ -13,9 +13,10 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_user
 from app.brokers.kis import KISBroker
+from app.brokers.kis_overseas import KISOverseasBroker
 from app.core.security import decrypt_secret, encrypt_secret, mask
 from app.db.session import get_db
-from app.models import AuditLog, BrokerCredential, Env, User
+from app.models import AuditLog, BrokerCredential, Env, Market, User
 from app.schemas import CredentialIn, CredentialOut, VerifyOut
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
@@ -26,6 +27,7 @@ def _to_out(c: BrokerCredential) -> CredentialOut:
         id=c.id,
         broker=c.broker,
         env=c.env.value,
+        market=c.market.value,
         label=c.label,
         app_key_masked=mask(decrypt_secret(c.app_key_enc)),
         account_no_masked=mask(decrypt_secret(c.account_no_enc), head=2, tail=2),
@@ -49,16 +51,19 @@ def upsert_credential(
     db: Session = Depends(get_db),
 ):
     env = Env(payload.env)
+    mkt = Market(payload.market)
     cred = (
         db.query(BrokerCredential)
-        .filter_by(user_id=user.id, broker=payload.broker, env=env)
+        .filter_by(user_id=user.id, broker=payload.broker, env=env, market=mkt)
         .one_or_none()
     )
     if cred is None:
-        cred = BrokerCredential(user_id=user.id, broker=payload.broker, env=env)
+        cred = BrokerCredential(user_id=user.id, broker=payload.broker, env=env, market=mkt)
         db.add(cred)
 
-    cred.label = payload.label or ("모의투자 계좌" if env == Env.paper else "실계좌")
+    시장 = "미국주식" if mkt == Market.us else "국내주식"
+    기본환경 = "모의투자" if env == Env.paper else "실계좌"
+    cred.label = payload.label or f"{시장} {기본환경} 계좌"
     cred.app_key_enc = encrypt_secret(payload.app_key.strip())
     cred.app_secret_enc = encrypt_secret(payload.app_secret.strip())
     cred.account_no_enc = encrypt_secret(payload.account_no.strip())
@@ -66,7 +71,7 @@ def upsert_credential(
     cred.last_error = None
     cred.updated_at = datetime.now()
 
-    db.add(AuditLog(user_id=user.id, event="credential.upsert", detail=f"{payload.broker}/{env.value}"))
+    db.add(AuditLog(user_id=user.id, event="credential.upsert", detail=f"{payload.broker}/{env.value}/{mkt.value}"))
     db.commit()
     db.refresh(cred)
     return _to_out(cred)
@@ -80,7 +85,8 @@ def verify_credential(
     if cred is None:
         raise HTTPException(404, "등록된 자격증명이 없습니다.")
 
-    broker = KISBroker(
+    cls = KISOverseasBroker if cred.market == Market.us else KISBroker
+    broker = cls(
         app_key=decrypt_secret(cred.app_key_enc),
         app_secret=decrypt_secret(cred.app_secret_enc),
         account_no=decrypt_secret(cred.account_no_enc),
@@ -89,7 +95,7 @@ def verify_credential(
     ok, message = broker.verify()
     cred.last_verified_at = datetime.now() if ok else cred.last_verified_at
     cred.last_error = None if ok else message
-    db.add(AuditLog(user_id=user.id, event="credential.verify", detail=f"{cred.env.value}:{ok}"))
+    db.add(AuditLog(user_id=user.id, event="credential.verify", detail=f"{cred.env.value}/{cred.market.value}:{ok}"))
     db.commit()
     return VerifyOut(ok=ok, message=message)
 
@@ -102,5 +108,5 @@ def delete_credential(
     if cred is None:
         raise HTTPException(404, "등록된 자격증명이 없습니다.")
     db.delete(cred)
-    db.add(AuditLog(user_id=user.id, event="credential.delete", detail=cred.env.value))
+    db.add(AuditLog(user_id=user.id, event="credential.delete", detail=f"{cred.env.value}/{cred.market.value}"))
     db.commit()

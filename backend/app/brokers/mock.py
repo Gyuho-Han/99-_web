@@ -22,7 +22,8 @@ from app.brokers.base import (
     OrderResult,
     Quote,
 )
-from app.models import CashAccount, Env, Position
+from app.brokers import us_universe
+from app.models import CashAccount, Env, Market, Position
 
 # 데모 유니버스 — 국내 대형주 위주
 UNIVERSE: dict[str, tuple[str, float]] = {
@@ -36,20 +37,32 @@ UNIVERSE: dict[str, tuple[str, float]] = {
     "068270": ("셀트리온", 178_600),
 }
 
-FEE_RATE = 0.00015    # 위탁수수료 0.015%
-TAX_RATE = 0.0018     # 매도 시 증권거래세 0.18%
+FEE_RATE = 0.00015    # 국내 위탁수수료 0.015%
+TAX_RATE = 0.0018     # 국내 매도 시 증권거래세 0.18%
+
+# 미국주식은 거래세가 없고 수수료 체계가 다르다(온라인 0.25% 안팎 + SEC/TAF 소액).
+US_FEE_RATE = 0.0025
+US_TAX_RATE = 0.0000229   # 매도 시 SEC 수수료 근사치
 
 
 def _seed(symbol: str) -> int:
     return int(hashlib.md5(symbol.encode()).hexdigest()[:8], 16)
 
 
+def _meta(symbol: str, market: Market) -> tuple[str, float, int]:
+    """(종목명, 기준가, 가격 반올림 자리수). 국내는 10원 단위, 미국은 센트 단위."""
+    if market == Market.us:
+        return us_universe.name_of(symbol), us_universe.base_price(symbol), 2
+    name, base = UNIVERSE.get(symbol, (symbol, 50_000))
+    return name, base, -1
+
+
 HORIZON = 520  # 항상 같은 길이의 경로를 생성해야 요청 구간이 달라도 값이 일치한다
 
 
-def _series(symbol: str, days: int) -> list[Candle]:
+def _series(symbol: str, days: int, market: Market = Market.kr) -> list[Candle]:
     """종목코드 기반 결정적 일봉 시계열. 요청 길이와 무관하게 같은 경로를 낸다."""
-    _, base = UNIVERSE.get(symbol, (symbol, 50_000))
+    _, base, digits = _meta(symbol, market)
     rng = random.Random(_seed(symbol))
     drift, vol = 0.0004, 0.018
     price = base * 0.82
@@ -68,10 +81,10 @@ def _series(symbol: str, days: int) -> list[Candle]:
         out.append(
             Candle(
                 date=d.isoformat(),
-                open=round(o, -1),
-                high=round(h, -1),
-                low=round(low, -1),
-                close=round(c, -1),
+                open=round(o, digits),
+                high=round(h, digits),
+                low=round(low, digits),
+                close=round(c, digits),
                 volume=int(abs(rng.gauss(8_000_000, 2_500_000))),
             )
         )
@@ -81,23 +94,33 @@ def _series(symbol: str, days: int) -> list[Candle]:
 class MockBroker(BrokerAdapter):
     name = "mock"
 
-    def __init__(self, db: Session, user_id: int, env: Env):
+    def __init__(self, db: Session, user_id: int, env: Env, market: Market = Market.kr):
         self.db, self.user_id, self.env = db, user_id, env
+        self.market = market
+        self.currency = "USD" if market == Market.us else "KRW"
 
     # -- 조회 ---------------------------------------------------------------
+    @property
+    def _fee_rate(self) -> float:
+        return US_FEE_RATE if self.market == Market.us else FEE_RATE
+
+    @property
+    def _tax_rate(self) -> float:
+        return US_TAX_RATE if self.market == Market.us else TAX_RATE
+
     def verify(self) -> tuple[bool, str]:
         return True, "시뮬레이터 어댑터입니다. 증권사 자격증명 없이 동작합니다."
 
     def get_candles(self, symbol: str, days: int = 120) -> list[Candle]:
-        return _series(symbol, days)
+        return _series(symbol, days, self.market)
 
     def get_quote(self, symbol: str) -> Quote:
         candles = self.get_candles(symbol, 3)
         last, prev = candles[-1], candles[-2]
-        name, _ = UNIVERSE.get(symbol, (symbol, 0))
+        name, _, digits = _meta(symbol, self.market)
         # 장중 흔들림: 분 단위로 조금씩 움직이게
         jitter = random.Random(_seed(symbol) + datetime.now().minute).gauss(0, 0.0015)
-        price = round(last.close * (1 + jitter), -1)
+        price = round(last.close * (1 + jitter), digits)
         return Quote(
             symbol=symbol,
             name=name,
@@ -108,16 +131,20 @@ class MockBroker(BrokerAdapter):
             low=min(last.low, price),
             volume=last.volume,
             ts=datetime.now(),
+            currency=self.currency,
+            exchange=us_universe.exchange_of(symbol) if self.market == Market.us else "",
         )
 
     def _cash_row(self) -> CashAccount:
         row = (
             self.db.query(CashAccount)
-            .filter_by(user_id=self.user_id, env=self.env)
+            .filter_by(user_id=self.user_id, env=self.env, market=self.market)
             .one_or_none()
         )
         if row is None:
-            row = CashAccount(user_id=self.user_id, env=self.env)
+            row = CashAccount(user_id=self.user_id, env=self.env, market=self.market)
+            if self.market == Market.us:
+                row.cash = row.deposit_total = 10_000.0   # 데모용 초기 USD 예수금
             self.db.add(row)
             self.db.commit()
             self.db.refresh(row)
@@ -127,21 +154,21 @@ class MockBroker(BrokerAdapter):
         cash = self._cash_row().cash
         rows = (
             self.db.query(Position)
-            .filter_by(user_id=self.user_id, env=self.env)
+            .filter_by(user_id=self.user_id, env=self.env, market=self.market)
             .filter(Position.quantity > 0)
             .all()
         )
         items = [
             BalanceItem(
                 symbol=p.symbol,
-                name=p.name or UNIVERSE.get(p.symbol, (p.symbol, 0))[0],
+                name=p.name or _meta(p.symbol, self.market)[0],
                 quantity=p.quantity,
                 avg_price=p.avg_price,
                 current_price=self.get_quote(p.symbol).price,
             )
             for p in rows
         ]
-        return Balance(cash=cash, holdings=items)
+        return Balance(cash=cash, holdings=items, currency=self.currency)
 
     # -- 주문 ---------------------------------------------------------------
     def place_order(
@@ -162,11 +189,11 @@ class MockBroker(BrokerAdapter):
         cash_row = self._cash_row()
         pos = (
             self.db.query(Position)
-            .filter_by(user_id=self.user_id, env=self.env, symbol=symbol)
+            .filter_by(user_id=self.user_id, env=self.env, market=self.market, symbol=symbol)
             .one_or_none()
         )
         gross = fill_price * quantity
-        fee = round(gross * FEE_RATE)
+        fee = round(gross * self._fee_rate, 2 if self.market == Market.us else 0)
 
         if side == "buy":
             if cash_row.cash < gross + fee:
@@ -176,8 +203,9 @@ class MockBroker(BrokerAdapter):
                 pos = Position(
                     user_id=self.user_id,
                     env=self.env,
+                    market=self.market,
                     symbol=symbol,
-                    name=UNIVERSE.get(symbol, (symbol, 0))[0],
+                    name=_meta(symbol, self.market)[0],
                     quantity=0,
                     avg_price=0.0,
                 )
@@ -188,7 +216,7 @@ class MockBroker(BrokerAdapter):
         else:
             if pos is None or pos.quantity < quantity:
                 return OrderResult(ok=False, message="보유 수량이 부족합니다.")
-            tax = round(gross * TAX_RATE)
+            tax = round(gross * self._tax_rate, 2 if self.market == Market.us else 0)
             fee += tax
             cash_row.cash += gross - fee
             pos.quantity -= quantity

@@ -21,6 +21,7 @@ from app.models import (
     CashAccount,
     EquitySnapshot,
     Env,
+    Market,
     Order,
     OrderStatus,
     Position,
@@ -30,7 +31,14 @@ from app.models import (
 
 DEMO_EMAIL = "demo@kairo.dev"
 DEMO_PASSWORD = "kairo1234"
-START_EQUITY = 10_000_000
+START_EQUITY = 10_000_000      # 국내 초기 예수금 (KRW)
+US_START_EQUITY = 10_000.0     # 미국 초기 예수금 (USD)
+
+# 시장별 (기본 유니버스, 거래시간). 미국 정규장은 한국 시간으로 밤이다.
+MARKET_DEFAULTS = {
+    Market.kr: ("005930,000660,035420", "09:05", "15:15"),
+    Market.us: ("AAPL,NVDA,MSFT", "22:35", "04:55"),
+}
 
 
 def seed_if_empty(db: Session) -> None:
@@ -46,18 +54,31 @@ def seed_if_empty(db: Session) -> None:
     db.commit()
     db.refresh(user)
 
+    # 환경 2종 × 시장 2종 = 네 조합에 각각 예수금과 에이전트 설정을 만들어 둔다.
     for env in (Env.paper, Env.live):
-        db.add(CashAccount(user_id=user.id, env=env, cash=START_EQUITY, deposit_total=START_EQUITY))
-        db.add(
-            AgentConfig(
-                user_id=user.id,
-                env=env,
-                universe="005930,000660,035420",
-                enabled=False,
+        for mkt in (Market.kr, Market.us):
+            seed_cash = US_START_EQUITY if mkt == Market.us else START_EQUITY
+            universe, start, end = MARKET_DEFAULTS[mkt]
+            db.add(
+                CashAccount(
+                    user_id=user.id, env=env, market=mkt,
+                    cash=seed_cash, deposit_total=seed_cash,
+                )
             )
-        )
+            db.add(
+                AgentConfig(
+                    user_id=user.id,
+                    env=env,
+                    market=mkt,
+                    universe=universe,
+                    trading_start=start,
+                    trading_end=end,
+                    enabled=False,
+                )
+            )
     db.commit()
 
+    # 과거 데이터는 국내 모의투자에만 만들어 둔다. 미국은 빈 상태에서 시작한다.
     _seed_history(db, user.id, Env.paper)
     db.commit()
 
@@ -113,7 +134,7 @@ def _seed_history(db: Session, user_id: int, env: Env) -> None:
                     executed = True
                     db.add(
                         Order(
-                            user_id=user_id, env=env, broker_order_id=f"SEED{i:04d}{s[-2:]}",
+                            user_id=user_id, env=env, market=Market.kr, broker_order_id=f"SEED{i:04d}{s[-2:]}",
                             symbol=s, name=UNIVERSE[s][0], side=Side.buy, order_type="limit",
                             quantity=n, price=price, filled_quantity=n, filled_price=price,
                             fee=fee, status=OrderStatus.filled, source="agent",
@@ -131,7 +152,7 @@ def _seed_history(db: Session, user_id: int, env: Env) -> None:
                 executed = True
                 db.add(
                     Order(
-                        user_id=user_id, env=env, broker_order_id=f"SEED{i:04d}{s[-2:]}S",
+                        user_id=user_id, env=env, market=Market.kr, broker_order_id=f"SEED{i:04d}{s[-2:]}S",
                         symbol=s, name=UNIVERSE[s][0], side=Side.sell, order_type="limit",
                         quantity=qty, price=price, filled_quantity=qty, filled_price=price,
                         fee=fee, realized_pnl=realized, status=OrderStatus.filled, source="agent",
@@ -146,7 +167,7 @@ def _seed_history(db: Session, user_id: int, env: Env) -> None:
                 spread = abs(edge) / 4
                 db.add(
                     AgentSignal(
-                        user_id=user_id, env=env, symbol=s,
+                        user_id=user_id, env=env, market=Market.kr, symbol=s,
                         action=AgentAction(action), confidence=round(conf, 3),
                         q_buy=round(edge / 2 + rng.gauss(0, 0.15), 3),
                         q_hold=0.25,
@@ -164,7 +185,7 @@ def _seed_history(db: Session, user_id: int, env: Env) -> None:
         bench_now = sum(series[s][d].close for s in symbols) / len(symbols)
         db.add(
             EquitySnapshot(
-                user_id=user_id, env=env, date=day,
+                user_id=user_id, env=env, market=Market.kr, date=day,
                 cash=round(cash), holdings_value=round(hv), total_equity=round(equity),
                 benchmark_value=round(START_EQUITY * bench_now / bench_base),
             )
@@ -174,10 +195,10 @@ def _seed_history(db: Session, user_id: int, env: Env) -> None:
     for s, (q, avg) in holdings.items():
         if q:
             db.add(
-                Position(user_id=user_id, env=env, symbol=s, name=UNIVERSE[s][0],
+                Position(user_id=user_id, env=env, market=Market.kr, symbol=s, name=UNIVERSE[s][0],
                          quantity=q, avg_price=avg)
             )
 
-    cash_row = db.query(CashAccount).filter_by(user_id=user_id, env=env).one()
+    cash_row = db.query(CashAccount).filter_by(user_id=user_id, env=env, market=Market.kr).one()
     cash_row.cash = round(cash)
     _ = math, equity_prev, timedelta  # 정적 분석 경고 억제

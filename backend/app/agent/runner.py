@@ -4,6 +4,9 @@
 ① 거래 시간 ② 신뢰도 임계값 ③ 종목당 비중 한도 ④ 1회 주문금액 한도
 ⑤ 일일 손실 한도를 순서대로 검사한다. 하나라도 걸리면 신호는 기록하되
 주문은 내지 않는다(executed=False).
+
+국내(kr)와 미국(us)은 같은 루프를 쓰되 설정이 시장별로 따로 있다. 미국 정규장은
+한국 시간으로 밤을 넘기므로 거래 시간 판정이 자정을 넘는 구간을 지원한다.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from app.models import (
     AgentSignal,
     EquitySnapshot,
     Env,
+    Market,
     Order,
     OrderStatus,
     Side,
@@ -38,14 +42,24 @@ class RiskBlocked(Exception):
 
 
 def _within_hours(cfg: AgentConfig) -> bool:
+    """거래 시간 판정. 미국장처럼 자정을 넘는 구간(22:35~04:55)도 지원한다."""
     now = datetime.now().strftime("%H:%M")
-    return cfg.trading_start <= now <= cfg.trading_end
+    start, end = cfg.trading_start, cfg.trading_end
+    if start <= end:
+        return start <= now <= end
+    return now >= start or now <= end
 
 
-def _daily_pnl_pct(db: Session, user_id: int, env: Env, equity: float) -> float:
+def _daily_pnl_pct(
+    db: Session, user_id: int, env: Env, market: Market, equity: float
+) -> float:
     prev = (
         db.query(EquitySnapshot)
-        .filter(EquitySnapshot.user_id == user_id, EquitySnapshot.env == env)
+        .filter(
+            EquitySnapshot.user_id == user_id,
+            EquitySnapshot.env == env,
+            EquitySnapshot.market == market,
+        )
         .filter(EquitySnapshot.date < date.today())
         .order_by(EquitySnapshot.date.desc())
         .first()
@@ -55,22 +69,35 @@ def _daily_pnl_pct(db: Session, user_id: int, env: Env, equity: float) -> float:
     return (equity / prev.total_equity - 1) * 100
 
 
-def step_once(db: Session, user_id: int, env: Env, dry_run: bool = False) -> list[dict]:
-    """유니버스 전 종목에 대해 정책을 1회 실행한다."""
-    cfg = db.query(AgentConfig).filter_by(user_id=user_id, env=env).one_or_none()
+def step_once(
+    db: Session,
+    user_id: int,
+    env: Env,
+    market: Market = Market.kr,
+    dry_run: bool = False,
+) -> list[dict]:
+    """해당 시장 유니버스 전 종목에 대해 정책을 1회 실행한다."""
+    cfg = (
+        db.query(AgentConfig).filter_by(user_id=user_id, env=env, market=market).one_or_none()
+    )
     if cfg is None:
-        cfg = AgentConfig(user_id=user_id, env=env)
+        cfg = AgentConfig(user_id=user_id, env=env, market=market)
         db.add(cfg)
         db.commit()
         db.refresh(cfg)
 
-    broker = get_broker(db, user_id, env)
+    broker = get_broker(db, user_id, env, market)
     balance = broker.get_balance()
     equity = balance.total_equity or 1.0
     held = {h.symbol: h for h in balance.holdings}
 
     results: list[dict] = []
-    symbols = [s.strip() for s in cfg.universe.split(",") if s.strip()]
+    # 미국 종목코드는 대문자로 정규화한다(aapl 로 넣어도 동작하도록).
+    symbols = [
+        (s.strip().upper() if market == Market.us else s.strip())
+        for s in cfg.universe.split(",")
+        if s.strip()
+    ]
 
     for symbol in symbols:
         try:
@@ -96,7 +123,8 @@ def step_once(db: Session, user_id: int, env: Env, dry_run: bool = False) -> lis
         signal = AgentSignal(
             user_id=user_id,
             env=env,
-            symbol=symbol,
+            market=market,
+            symbol=quote.symbol,
             action=AgentAction(out.action),
             confidence=out.confidence,
             q_buy=out.q_values.get("buy", 0.0),
@@ -121,7 +149,7 @@ def step_once(db: Session, user_id: int, env: Env, dry_run: bool = False) -> lis
                 raise RiskBlocked(
                     f"신뢰도 {out.confidence:.2f} < 임계값 {cfg.confidence_threshold:.2f}"
                 )
-            if _daily_pnl_pct(db, user_id, env, equity) <= -cfg.daily_loss_limit_pct:
+            if _daily_pnl_pct(db, user_id, env, market, equity) <= -cfg.daily_loss_limit_pct:
                 raise RiskBlocked(f"일일 손실 한도 {cfg.daily_loss_limit_pct}% 도달")
 
             if out.action == "buy":
@@ -137,12 +165,13 @@ def step_once(db: Session, user_id: int, env: Env, dry_run: bool = False) -> lis
                 qty = h.quantity
                 side = Side.sell
 
-            res = broker.place_order(symbol, out.action, qty, quote.price, "limit")
+            res = broker.place_order(quote.symbol, out.action, qty, quote.price, "limit")
             order = Order(
                 user_id=user_id,
                 env=env,
+                market=market,
                 broker_order_id=res.broker_order_id,
-                symbol=symbol,
+                symbol=quote.symbol,
                 name=quote.name,
                 side=side,
                 order_type="limit",
@@ -168,7 +197,9 @@ def step_once(db: Session, user_id: int, env: Env, dry_run: bool = False) -> lis
         db.add(signal)
         results.append(
             {
-                "symbol": symbol,
+                "symbol": quote.symbol,
+                "market": market.value,
+                "currency": quote.currency,
                 "name": quote.name,
                 "action": out.action,
                 "confidence": out.confidence,
@@ -208,9 +239,14 @@ class AgentLoop:
             try:
                 for cfg in db.query(AgentConfig).filter_by(enabled=True).all():
                     try:
-                        step_once(db, cfg.user_id, cfg.env)
+                        step_once(db, cfg.user_id, cfg.env, cfg.market)
                     except Exception:  # noqa: BLE001
-                        log.exception("에이전트 스텝 실패 user=%s env=%s", cfg.user_id, cfg.env)
+                        log.exception(
+                            "에이전트 스텝 실패 user=%s env=%s market=%s",
+                            cfg.user_id,
+                            cfg.env,
+                            cfg.market,
+                        )
             finally:
                 db.close()
 

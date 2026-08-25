@@ -1,6 +1,7 @@
 # KAIRO — 강화학습 자동매매 콘솔
 
-한국투자증권 KIS Open API와 연결되는 자동매매 시스템입니다. 학습한 강화학습 정책을
+한국투자증권 KIS Open API와 연결되는 자동매매 시스템입니다. **국내주식과 미국주식**을
+상단 시장 토글 하나로 오가며, 두 시장의 자격증명·포지션·주문·설정·성과가 완전히 분리됩니다. 학습한 강화학습 정책을
 서버에 등록하면 바로 실거래 파이프라인에 올라갑니다. 지금은 정책 자리에 규칙 기반
 베이스라인이 들어가 있고, 증권사 자격증명이 없어도 내장 시뮬레이터로 전체 흐름이 돕니다.
 
@@ -96,6 +97,56 @@ cd backend && python scripts/check_kis.py 000660   # 종목 지정
 
 ---
 
+## 미국주식 붙이기
+
+**추가로 발급받을 API 키는 없습니다.** KIS 해외주식 API는 국내와 같은 앱키를 쓰기 때문에,
+이미 `.env`에 넣은 `KIS_APP_KEY` / `KIS_APP_SECRET` 그대로 미국 시세가 나옵니다.
+상단바의 **한국 / 미국** 토글만 누르면 됩니다.
+
+주문까지 실제로 내려면 해외주식 계좌번호 한 줄만 더 채우면 됩니다.
+
+```dotenv
+KIS_OVERSEAS_ACCOUNT_NO=50123456-01
+```
+
+확인:
+
+```bash
+cd backend && python scripts/check_kis.py us          # AAPL
+cd backend && python scripts/check_kis.py us NVDA     # 종목 지정
+```
+
+### 두 시장이 나뉘는 지점
+
+거래 데이터는 `env`(모의/실계좌)와 `market`(kr/us) 두 축으로 저장됩니다. 조합이 네 가지이므로
+모의투자·국내와 실계좌·미국은 예수금부터 주문 내역까지 서로 완전히 남남입니다.
+
+| | 국내 (kr) | 미국 (us) |
+|---|---|---|
+| 통화 | KRW, 원 단위 정수 | USD, 센트까지 |
+| 어댑터 | `brokers/kis.py` | `brokers/kis_overseas.py` |
+| 조회 파라미터 | 종목코드 6자리 | 티커 + 거래소코드(NAS·NYS·AMS) |
+| 기본 유니버스 | 삼성전자·SK하이닉스·NAVER | AAPL·NVDA·MSFT |
+| 기본 거래시간 | 09:05~15:15 | 22:35~04:55 (한국 시간, 자정을 넘김) |
+| 시뮬레이터 수수료 | 0.015% + 거래세 0.18% | 0.25% + SEC 수수료 |
+| 초기 데모 예수금 | 1,000만 원 | 10,000 달러 |
+
+### 알아 둘 것
+
+- **미국 실시간 시세는 KIS에서 별도 신청**해야 합니다. 신청 전에는 지연시세가 나오거나 조회가
+  막힐 수 있고, 막히면 자동으로 시뮬레이터 시세로 내려갑니다(상단 배지가 회색으로 바뀝니다).
+- **미국은 시장가 주문이 없습니다.** 시장가로 요청하면 현재가 지정가로 바꿔 전송합니다.
+- **거래시간이 자정을 넘습니다.** 리스크 게이트의 시간 판정이 `22:35~04:55` 같은 구간을
+  지원하도록 되어 있습니다.
+- **환율 환산은 하지 않습니다.** 미국 화면의 금액은 전부 달러 그대로입니다. 원화 환산이 필요하면
+  `USD_KRW_RATE`에 값을 넣고 표시 계층을 손봐야 합니다.
+- 기존 DB는 서버가 처음 뜰 때 `market` 축이 있는 형태로 **자동 마이그레이션**됩니다. 옮기기 전에
+  `backend/data/kairo.db.bak-<시각>` 으로 백업하며, 기존 데이터는 모두 국내 시장으로 들어갑니다.
+- **해외주식 TR_ID 확인 필요**: 국내와 마찬가지로 `app/brokers/kis_overseas.py` 상단의 `_TR` 표를
+  연동 전에 KIS 개발자센터 최신 문서와 대조하세요. 주문·취소 TR_ID가 특히 그렇습니다.
+
+---
+
 ## 화면
 
 | 경로 | 하는 일 |
@@ -178,8 +229,10 @@ register_policy("ppo-ensemble-v1", PPOEnsemblePolicy("checkpoints/ppo.pt"))
 
 ```
 BrokerAdapter (ABC)
-├── KISBroker    실계좌 / 모의투자 도메인·TR_ID 분기, 토큰 캐싱
-└── MockBroker   결정적 GBM 시세 + 체결·수수료·세금 시뮬레이션
+├── KISBroker          국내주식. 실계좌/모의투자 도메인·TR_ID 분기, 토큰 캐싱
+├── KISOverseasBroker  미국주식. 거래소코드(EXCD)·USD·해외 TR_ID, 토큰은 위와 공유
+├── MockBroker         결정적 GBM 시세 + 체결·수수료·세금 시뮬레이션 (시장별 단가/수수료)
+└── HybridBroker       실시세 + 모의체결 (MockBroker 상속, 시세만 교체)
 ```
 
 자격증명이 없으면 `factory.get_broker()`가 자동으로 `MockBroker`를 돌려줍니다. 다른
@@ -244,7 +297,9 @@ backend/
     core/       설정, 암호화·JWT
     db/         SQLAlchemy 세션
     models/     ORM (사용자, 자격증명, 포지션, 주문, 신호, 스냅샷, 감사로그)
-    brokers/    base(ABC) · kis · market(실시세+캐시) · hybrid(실시세+모의체결) · mock · factory
+    brokers/    base(ABC) · kis(국내) · kis_overseas(미국) · us_universe
+                market(실시세+캐시) · hybrid(실시세+모의체결) · mock · factory
+    db/         session · migrate(market 축 마이그레이션)
     agent/      policy(모델 연결 지점) · runner(리스크 게이트 + 루프)
     services/   metrics · seed
     api/        auth · credentials · trading · insight
@@ -259,7 +314,9 @@ frontend/
 
 ## 남은 일
 
-- [ ] KIS 일봉 100건 제한 우회 (구간 분할 호출) — 현재는 최근 100영업일까지
+- [ ] KIS 일봉 100건 제한 우회 (구간 분할 호출) — 국내·미국 모두 최근 100영업일까지
+- [ ] 미국 실시간시세 이용 신청 후 지연시세 여부 확인
+- [ ] USD/KRW 환율 조회를 붙여 두 시장 합산 평가금액 표시
 - [ ] KR-FinBert-SC 감성 파이프라인을 `sentiment` 필드에 연결
 - [ ] KIS 체결 조회(`inquire-daily-ccld`)로 미체결 주문 상태 폴링
 - [ ] 일별 `EquitySnapshot` 자동 적재 스케줄러 (현재는 시드만 존재)

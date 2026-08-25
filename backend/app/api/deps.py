@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.db.session import get_db
-from app.models import Env, User
+from app.models import Env, Market, User
 
 
 def current_user(
@@ -25,3 +25,8 @@ def current_user(
 
 def env_param(env: str = Query(default="paper", pattern="^(paper|live)$")) -> Env:
     return Env(env)
+
+
+def market_param(market: str = Query(default="kr", pattern="^(kr|us)$")) -> Market:
+    """거래 시장. kr=국내주식(KRW) · us=미국주식(USD)."""
+    return Market(market)

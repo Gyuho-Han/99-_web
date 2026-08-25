@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from app.agent.runner import agent_loop
 from app.api import routes_auth, routes_credentials, routes_insight, routes_trading
 from app.core.config import settings
+from app.db.migrate import ensure_market_axis
 from app.db.session import Base, SessionLocal, engine
 from app.services.seed import DEMO_EMAIL, DEMO_PASSWORD, seed_if_empty
 
@@ -21,6 +22,8 @@ log = logging.getLogger("kairo")
 async def lifespan(app: FastAPI):
     import app.models  # noqa: F401  테이블 등록
 
+    # 기존 DB에 market(kr|us) 축이 없으면 옮긴다. 이미 최신이면 아무 일도 하지 않는다.
+    ensure_market_axis(engine, Base)
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:

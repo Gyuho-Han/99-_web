@@ -1,5 +1,6 @@
 import { AlertTriangle, Check, Info, Loader2, X } from "lucide-react";
 import { useApp } from "../lib/store";
+import { isUSD } from "../lib/format";
 
 const cx = (...c) => c.filter(Boolean).join(" ");
 
@@ -173,14 +174,35 @@ export function Badge({ tone = "neutral", children, className }) {
 
 /**
  * 금액 조판. 레퍼런스처럼 정수부는 크게, 단위는 작게 붙인다.
- * 원화는 소수점을 쓰지 않으므로 "만/억" 단위를 작은 글자로 분리한다.
+ * 원화는 소수점을 쓰지 않으므로 "만/억" 단위를 작은 글자로 분리하고,
+ * 달러는 소수점 두 자리를 작은 글자로 분리한다.
  */
-export function Money({ value, size = 30, unit = "원", className }) {
+export function Money({ value, size = 30, unit, className }) {
+  // 달러: 1,234.56 을 "1,234" + ".56" 으로 나눠 조판한다.
+  if (isUSD()) {
+    const raw = value ?? 0;
+    const neg = raw < 0;
+    const abs = Math.abs(raw);
+    const whole = Math.floor(abs);
+    const cents = Math.round((abs - whole) * 100);
+    return (
+      <span
+        className={cx("amount leading-none inline-flex items-baseline", className)}
+        style={{ fontSize: size }}
+      >
+        {neg && <span className="mr-[0.06em]">−</span>}
+        <span className="unit mr-[0.04em]">$</span>
+        {whole.toLocaleString("en-US")}
+        <span className="unit">.{String(cents).padStart(2, "0")}</span>
+      </span>
+    );
+  }
+
   const v = Math.round(value ?? 0);
   const neg = v < 0;
   const abs = Math.abs(v);
   let head = abs.toLocaleString("ko-KR");
-  let tail = unit;
+  let tail = unit ?? "원";
 
   if (abs >= 100_000_000) {
     const eok = Math.floor(abs / 100_000_000);

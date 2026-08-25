@@ -11,6 +11,7 @@ env 값 하나로 분기한다.
 from __future__ import annotations
 
 import threading
+import time
 from datetime import date, datetime, timedelta
 
 import httpx
@@ -45,8 +46,28 @@ def _num(v, default: float = 0.0) -> float:
         return default
 
 
+# 앱키별 접근토큰 캐시. 프로세스 전체가 공유한다.
 _token_cache: dict[str, tuple[str, datetime]] = {}
-_token_lock = threading.Lock()
+# 발급 실패 기록: 앱키 -> (재시도 가능 시각, 사유). 실패를 기억해 두지 않으면
+# 매 요청마다 KIS를 다시 두드리게 되고, 그동안 화면이 멈춘 것처럼 보인다.
+_token_fail: dict[str, tuple[float, str]] = {}
+# 앱키별 발급 락. 네트워크 대기를 이 락 안에서 하지 않는 것이 핵심이다.
+_token_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+def _lock_for(key: str) -> threading.Lock:
+    with _locks_guard:
+        lock = _token_locks.get(key)
+        if lock is None:
+            lock = _token_locks[key] = threading.Lock()
+        return lock
+
+
+def last_token_error(app_key: str, is_paper: bool) -> str | None:
+    """가장 최근 토큰 발급 실패 사유. 화면에 왜 시뮬레이터로 내려갔는지 알려 주는 용도."""
+    hit = _token_fail.get(f"{app_key}:{'paper' if is_paper else 'real'}")
+    return hit[1] if hit and time.time() < hit[0] else None
 
 
 class KISBroker(BrokerAdapter):
@@ -61,7 +82,13 @@ class KISBroker(BrokerAdapter):
         self.prdt_cd = cleaned[8:] or "01"
         self.is_paper = is_paper
         self.base = settings.kis_paper_base if is_paper else settings.kis_real_base
-        self._client = httpx.Client(base_url=self.base, timeout=10.0)
+        # 연결은 더 짧게, 응답 대기는 설정값으로. 길게 잡으면 화면이 그만큼 멈춘다.
+        self._client = httpx.Client(
+            base_url=self.base,
+            timeout=httpx.Timeout(
+                settings.kis_timeout_seconds, connect=min(3.0, settings.kis_timeout_seconds)
+            ),
+        )
 
     # -- 인증 ---------------------------------------------------------------
     def _tr(self, key: str) -> str:
@@ -72,28 +99,75 @@ class KISBroker(BrokerAdapter):
     def _cache_key(self) -> str:
         return f"{self.app_key}:{'paper' if self.is_paper else 'real'}"
 
-    def _access_token(self) -> str:
-        with _token_lock:
-            hit = _token_cache.get(self._cache_key)
-            if hit and hit[1] > datetime.now() + timedelta(minutes=1):
-                return hit[0]
+    def _cached_token(self) -> str | None:
+        hit = _token_cache.get(self._cache_key)
+        if hit and hit[1] > datetime.now() + timedelta(minutes=1):
+            return hit[0]
+        return None
 
-            res = self._client.post(
-                "/oauth2/tokenP",
-                json={
-                    "grant_type": "client_credentials",
-                    "appkey": self.app_key,
-                    "appsecret": self.app_secret,
-                },
-            )
-            res.raise_for_status()
-            data = res.json()
+    def _access_token(self) -> str:
+        """접근토큰. 만료 1분 전까지 캐시한다.
+
+        중요: 발급 네트워크 호출을 락 안에서 하지 않는다. 예전 구현은 전역 락을
+        잡은 채로 KIS 응답을 기다렸기 때문에, KIS가 느리면 이 토큰을 쓰는 모든
+        요청(대시보드 조회, 에이전트 루프)이 줄줄이 막혀 화면이 멈춘 것처럼 보였다.
+        지금은 ① 캐시 확인 → ② 최근 실패면 즉시 실패 → ③ 락을 잡은 스레드 하나만
+        발급을 시도하고, 나머지는 기다리지 않고 곧바로 돌아온다.
+        """
+        key = self._cache_key
+        now = time.time()
+
+        token = self._cached_token()
+        if token:
+            return token
+
+        fail = _token_fail.get(key)
+        if fail and now < fail[0]:
+            # 최근에 실패했다. 재시도 시각까지는 네트워크를 두드리지 않는다.
+            raise RuntimeError(fail[1])
+
+        lock = _lock_for(key)
+        if not lock.acquire(blocking=False):
+            # 다른 스레드가 이미 발급 중. 여기서 기다리면 그만큼 화면이 멈춘다.
+            token = self._cached_token()
+            if token:
+                return token
+            raise RuntimeError("접근토큰을 발급하는 중입니다. 잠시 후 다시 시도하세요.")
+
+        try:
+            token = self._cached_token()   # 락을 기다리는 사이 다른 스레드가 채웠을 수 있다
+            if token:
+                return token
+
+            try:
+                res = self._client.post(
+                    "/oauth2/tokenP",
+                    json={
+                        "grant_type": "client_credentials",
+                        "appkey": self.app_key,
+                        "appsecret": self.app_secret,
+                    },
+                )
+                res.raise_for_status()
+                data = res.json()
+            except Exception as e:  # noqa: BLE001
+                reason = f"접근토큰 발급 실패: {e}"
+                _token_fail[key] = (now + settings.kis_token_retry_seconds, reason)
+                raise RuntimeError(reason) from e
+
             token = data.get("access_token")
             if not token:
-                raise RuntimeError(data.get("msg1") or "접근토큰 발급에 실패했습니다.")
+                # KIS는 발급 횟수를 넘기면 EGW00133 같은 코드를 돌려준다.
+                reason = data.get("msg1") or "접근토큰 발급에 실패했습니다."
+                _token_fail[key] = (now + settings.kis_token_retry_seconds, reason)
+                raise RuntimeError(reason)
+
+            _token_fail.pop(key, None)
             expires = datetime.now() + timedelta(seconds=int(data.get("expires_in", 86400)))
-            _token_cache[self._cache_key] = (token, expires)
+            _token_cache[key] = (token, expires)
             return token
+        finally:
+            lock.release()
 
     def _headers(self, tr_id: str, is_post: bool = False) -> dict[str, str]:
         h = {
