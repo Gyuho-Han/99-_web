@@ -23,7 +23,9 @@ from app.brokers.base import (
     Balance,
     BalanceItem,
     BrokerAdapter,
+    BrokerError,
     Candle,
+    Fill,
     OrderResult,
     Quote,
 )
@@ -39,6 +41,7 @@ _TR = {
     "buy":     ("TTTT1002U", "VTTT1002U"),
     "sell":    ("TTTT1006U", "VTTT1001U"),
     "cancel":  ("TTTT1004U", "VTTT1004U"),
+    "fills":   ("TTTS3035R", "VTTS3035R"),
 }
 
 
@@ -115,7 +118,7 @@ class KISOverseasBroker(BrokerAdapter):
         res.raise_for_status()
         body = res.json()
         if not self._ok(body):
-            raise RuntimeError(body.get("msg1") or "미국 시세 조회에 실패했습니다.")
+            raise BrokerError(body.get("msg1") or "미국 시세 조회에 실패했습니다.")
         o = body.get("output") or {}
 
         price = _num(o.get("last"))
@@ -160,7 +163,7 @@ class KISOverseasBroker(BrokerAdapter):
         res.raise_for_status()
         body = res.json()
         if not self._ok(body):
-            raise RuntimeError(body.get("msg1") or "미국 일봉 조회에 실패했습니다.")
+            raise BrokerError(body.get("msg1") or "미국 일봉 조회에 실패했습니다.")
 
         rows = body.get("output2") or []
         candles = [
@@ -194,7 +197,7 @@ class KISOverseasBroker(BrokerAdapter):
         res.raise_for_status()
         body = res.json()
         if not self._ok(body):
-            raise RuntimeError(body.get("msg1") or "해외 잔고 조회에 실패했습니다.")
+            raise BrokerError(body.get("msg1") or "해외 잔고 조회에 실패했습니다.")
 
         holdings = [
             BalanceItem(
@@ -263,6 +266,63 @@ class KISOverseasBroker(BrokerAdapter):
             filled_price=0.0,
             message=body.get("msg1", "주문을 접수했습니다."),
         )
+
+    # -- 체결 조회 -----------------------------------------------------------
+    def get_fills(self, broker_order_ids: list[str]) -> dict[str, Fill]:
+        """해외주식 주문체결내역. 국내와 같은 방식으로 한 번에 받아 골라낸다."""
+        wanted = {o for o in broker_order_ids if o}
+        if not wanted:
+            return {}
+        if not self.cano or self.cano == "00000000":
+            return {}
+
+        end = date.today()
+        start = end - timedelta(days=7)
+        try:
+            res = self._client.get(
+                "/uapi/overseas-stock/v1/trading/inquire-ccnl",
+                headers=self._headers(self._tr("fills")),
+                params={
+                    "CANO": self.cano,
+                    "ACNT_PRDT_CD": self.prdt_cd,
+                    "PDNO": "%",               # %=전체 종목
+                    "ORD_STRT_DT": start.strftime("%Y%m%d"),
+                    "ORD_END_DT": end.strftime("%Y%m%d"),
+                    "SLL_BUY_DVSN": "00",      # 00=전체
+                    "CCLD_NCCS_DVSN": "00",    # 00=전체(체결+미체결)
+                    "OVRS_EXCG_CD": "%",       # %=전체 거래소
+                    "SORT_SQN": "DS",
+                    "ORD_DT": "",
+                    "ORD_GNO_BRNO": "",
+                    "ODNO": "",
+                    "CTX_AREA_FK200": "",
+                    "CTX_AREA_NK200": "",
+                },
+            )
+            res.raise_for_status()
+            body = res.json()
+        except Exception as e:  # noqa: BLE001
+            raise BrokerError(f"해외 체결 조회에 실패했습니다: {e}") from e
+
+        if not self._ok(body):
+            raise BrokerError(body.get("msg1") or "해외 체결 조회에 실패했습니다.")
+
+        out: dict[str, Fill] = {}
+        for r in body.get("output") or []:
+            odno = (r.get("odno") or "").strip()
+            key = odno if odno in wanted else odno.lstrip("0")
+            if key not in wanted:
+                continue
+            out[key] = Fill(
+                broker_order_id=key,
+                ordered_quantity=int(_num(r.get("ft_ord_qty"))),
+                filled_quantity=int(_num(r.get("ft_ccld_qty"))),
+                filled_price=_num(r.get("ft_ccld_unpr3")),
+                # 취소 주문은 주문수량 대비 잔여수량이 아니라 거부사유로 오는 경우가 있어
+                # 두 필드를 모두 본다.
+                canceled=str(r.get("cncl_yn", "N")).upper() == "Y",
+            )
+        return out
 
     def cancel_order(self, broker_order_id: str) -> OrderResult:
         payload = {

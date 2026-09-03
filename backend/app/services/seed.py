@@ -34,10 +34,11 @@ DEMO_PASSWORD = "kairo1234"
 START_EQUITY = 10_000_000      # 국내 초기 예수금 (KRW)
 US_START_EQUITY = 10_000.0     # 미국 초기 예수금 (USD)
 
-# 시장별 (기본 유니버스, 거래시간). 미국 정규장은 한국 시간으로 밤이다.
+# 시장별 (기본 유니버스, 거래시간, 1회 최대 주문금액).
+# 미국 정규장은 한국 시간으로 밤이고, 금액 단위도 달러라 따로 둔다.
 MARKET_DEFAULTS = {
-    Market.kr: ("005930,000660,035420", "09:05", "15:15"),
-    Market.us: ("AAPL,NVDA,MSFT", "22:35", "04:55"),
+    Market.kr: ("005930,000660,035420", "09:05", "15:15", 2_000_000.0),
+    Market.us: ("AAPL,NVDA,MSFT", "22:35", "04:55", 2_000.0),
 }
 
 
@@ -58,7 +59,7 @@ def seed_if_empty(db: Session) -> None:
     for env in (Env.paper, Env.live):
         for mkt in (Market.kr, Market.us):
             seed_cash = US_START_EQUITY if mkt == Market.us else START_EQUITY
-            universe, start, end = MARKET_DEFAULTS[mkt]
+            universe, start, end, max_order = MARKET_DEFAULTS[mkt]
             db.add(
                 CashAccount(
                     user_id=user.id, env=env, market=mkt,
@@ -73,6 +74,7 @@ def seed_if_empty(db: Session) -> None:
                     universe=universe,
                     trading_start=start,
                     trading_end=end,
+                    max_order_amount=max_order,
                     enabled=False,
                 )
             )

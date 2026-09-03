@@ -1,7 +1,10 @@
 """가벼운 스키마 마이그레이션.
 
 Alembic을 쓸 만큼 큰 프로젝트가 아니므로, 서버가 뜰 때 필요한 변경만 직접 적용한다.
-지금 필요한 변경은 하나 — 거래 데이터에 market(kr|us) 축을 추가하는 것이다.
+두 가지를 본다.
+
+  ① 거래 데이터에 market(kr|us) 축 추가 — 테이블을 다시 만들어야 한다
+  ② 뒤늦게 붙은 nullable 컬럼 추가 — ALTER TABLE 한 줄이면 된다
 
 SQLite는 이미 만들어진 테이블의 UNIQUE 제약을 바꿀 수 없어서, 컬럼만 덧붙이는
 ALTER로는 부족하다. (user_id, env) 유니크가 걸려 있으면 같은 환경에 국내용·미국용
@@ -76,6 +79,34 @@ def _rebuild(engine: Engine, base, table: str) -> None:
         conn.execute(text(f'DROP TABLE "{table}__old"'))
 
     log.info("  %s: %d행을 market='kr'로 옮겼습니다.", table, moved)
+
+
+# 뒤늦게 붙은 nullable 컬럼. (테이블, 컬럼, SQL 타입)
+ADDED_COLUMNS = [
+    ("agent_configs", "risk_ack_at", "DATETIME"),
+    ("agent_configs", "order_cooldown_seconds", "INTEGER NOT NULL DEFAULT 300"),
+    ("agent_configs", "max_daily_orders", "INTEGER NOT NULL DEFAULT 20"),
+]
+
+
+def ensure_columns(engine: Engine) -> list[str]:
+    """빠진 nullable 컬럼을 ALTER TABLE 로 덧붙인다. 이미 있으면 아무것도 하지 않는다.
+
+    UNIQUE 제약을 건드리지 않으므로 테이블을 다시 만들 필요가 없다.
+    """
+    insp = inspect(engine)
+    existing = set(insp.get_table_names())
+    added: list[str] = []
+    for table, column, sql_type in ADDED_COLUMNS:
+        if table not in existing:
+            continue
+        if column in {c["name"] for c in insp.get_columns(table)}:
+            continue
+        with engine.begin() as conn:
+            conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {sql_type}'))
+        added.append(f"{table}.{column}")
+        log.info("컬럼을 추가했습니다: %s.%s", table, column)
+    return added
 
 
 def ensure_market_axis(engine: Engine, base) -> list[str]:

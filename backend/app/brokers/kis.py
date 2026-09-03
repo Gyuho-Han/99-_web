@@ -20,7 +20,9 @@ from app.brokers.base import (
     Balance,
     BalanceItem,
     BrokerAdapter,
+    BrokerError,
     Candle,
+    Fill,
     OrderResult,
     Quote,
 )
@@ -34,6 +36,7 @@ _TR = {
     "buy": ("TTTC0012U", "VTTC0012U"),
     "sell": ("TTTC0011U", "VTTC0011U"),
     "cancel": ("TTTC0013U", "VTTC0013U"),
+    "fills": ("TTTC8001R", "VTTC8001R"),
 }
 
 def _num(v, default: float = 0.0) -> float:
@@ -124,7 +127,7 @@ class KISBroker(BrokerAdapter):
         fail = _token_fail.get(key)
         if fail and now < fail[0]:
             # 최근에 실패했다. 재시도 시각까지는 네트워크를 두드리지 않는다.
-            raise RuntimeError(fail[1])
+            raise BrokerError(fail[1])
 
         lock = _lock_for(key)
         if not lock.acquire(blocking=False):
@@ -132,7 +135,7 @@ class KISBroker(BrokerAdapter):
             token = self._cached_token()
             if token:
                 return token
-            raise RuntimeError("접근토큰을 발급하는 중입니다. 잠시 후 다시 시도하세요.")
+            raise BrokerError("접근토큰을 발급하는 중입니다. 잠시 후 다시 시도하세요.")
 
         try:
             token = self._cached_token()   # 락을 기다리는 사이 다른 스레드가 채웠을 수 있다
@@ -153,14 +156,14 @@ class KISBroker(BrokerAdapter):
             except Exception as e:  # noqa: BLE001
                 reason = f"접근토큰 발급 실패: {e}"
                 _token_fail[key] = (now + settings.kis_token_retry_seconds, reason)
-                raise RuntimeError(reason) from e
+                raise BrokerError(reason) from e
 
             token = data.get("access_token")
             if not token:
                 # KIS는 발급 횟수를 넘기면 EGW00133 같은 코드를 돌려준다.
                 reason = data.get("msg1") or "접근토큰 발급에 실패했습니다."
                 _token_fail[key] = (now + settings.kis_token_retry_seconds, reason)
-                raise RuntimeError(reason)
+                raise BrokerError(reason)
 
             _token_fail.pop(key, None)
             expires = datetime.now() + timedelta(seconds=int(data.get("expires_in", 86400)))
@@ -203,7 +206,7 @@ class KISBroker(BrokerAdapter):
         res.raise_for_status()
         body = res.json()
         if body.get("rt_cd") not in (None, "0"):
-            raise RuntimeError(body.get("msg1") or "시세 조회에 실패했습니다.")
+            raise BrokerError(body.get("msg1") or "시세 조회에 실패했습니다.")
         o = body.get("output") or {}
 
         price = _num(o.get("stck_prpr"))
@@ -250,7 +253,7 @@ class KISBroker(BrokerAdapter):
         res.raise_for_status()
         body = res.json()
         if body.get("rt_cd") not in (None, "0"):
-            raise RuntimeError(body.get("msg1") or "일봉 조회에 실패했습니다.")
+            raise BrokerError(body.get("msg1") or "일봉 조회에 실패했습니다.")
         rows = body.get("output2") or []
         candles = [
             Candle(
@@ -337,6 +340,69 @@ class KISBroker(BrokerAdapter):
             filled_price=0.0,
             message=body.get("msg1", "주문을 접수했습니다."),
         )
+
+    # -- 체결 조회 -----------------------------------------------------------
+    def get_fills(self, broker_order_ids: list[str]) -> dict[str, Fill]:
+        """주식일별주문체결조회. 접수만 된 주문의 체결 수량·평균단가를 채운다.
+
+        조회 한 번에 최근 구간의 주문이 통째로 오므로, 주문 하나당 한 번씩 부르지
+        않고 받아 온 목록에서 필요한 주문번호만 골라낸다. KIS는 초당 요청 수 제한이
+        있어서 이렇게 묶는 편이 안전하다.
+
+        모의투자는 조회 가능 구간이 실전보다 짧다. 못 찾은 주문은 결과에서 빠지고,
+        호출한 쪽은 그 주문을 건드리지 않는다.
+        """
+        wanted = {o for o in broker_order_ids if o}
+        if not wanted:
+            return {}
+
+        end = date.today()
+        start = end - timedelta(days=7)
+        try:
+            res = self._client.get(
+                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+                headers=self._headers(self._tr("fills")),
+                params={
+                    "CANO": self.cano,
+                    "ACNT_PRDT_CD": self.prdt_cd,
+                    "INQR_STRT_DT": start.strftime("%Y%m%d"),
+                    "INQR_END_DT": end.strftime("%Y%m%d"),
+                    "SLL_BUY_DVSN_CD": "00",   # 00=전체
+                    "INQR_DVSN": "00",         # 00=역순
+                    "PDNO": "",
+                    "CCLD_DVSN": "00",         # 00=전체(체결+미체결)
+                    "ORD_GNO_BRNO": "",
+                    "ODNO": "",
+                    "INQR_DVSN_3": "00",
+                    "INQR_DVSN_1": "",
+                    "CTX_AREA_FK100": "",
+                    "CTX_AREA_NK100": "",
+                },
+            )
+            res.raise_for_status()
+            body = res.json()
+        except Exception as e:  # noqa: BLE001
+            raise BrokerError(f"체결 조회에 실패했습니다: {e}") from e
+
+        if body.get("rt_cd") not in (None, "0"):
+            raise BrokerError(body.get("msg1") or "체결 조회에 실패했습니다.")
+
+        out: dict[str, Fill] = {}
+        for r in body.get("output1") or []:
+            odno = (r.get("odno") or "").strip()
+            # KIS는 주문번호를 0으로 채워 돌려주기도 한다. 접수 응답의 ODNO와
+            # 그대로 비교하면 놓치므로 앞자리 0을 떼고도 한 번 맞춰 본다.
+            key = odno if odno in wanted else odno.lstrip("0")
+            if key not in wanted:
+                continue
+            out[key] = Fill(
+                broker_order_id=key,
+                ordered_quantity=int(_num(r.get("ord_qty"))),
+                filled_quantity=int(_num(r.get("tot_ccld_qty"))),
+                filled_price=_num(r.get("avg_prvs")),
+                canceled=str(r.get("cncl_yn", "N")).upper() == "Y",
+            )
+        return out
 
     def cancel_order(self, broker_order_id: str) -> OrderResult:
         payload = {

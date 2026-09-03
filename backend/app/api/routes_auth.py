@@ -18,7 +18,7 @@ def _bootstrap(db: Session, user: User) -> None:
     for env in (Env.paper, Env.live):
         for mkt in (Market.kr, Market.us):
             seed_cash = US_START_EQUITY if mkt == Market.us else START_EQUITY
-            universe, start, end = MARKET_DEFAULTS[mkt]
+            universe, start, end, max_order = MARKET_DEFAULTS[mkt]
             db.add(
                 CashAccount(
                     user_id=user.id, env=env, market=mkt,
@@ -29,6 +29,7 @@ def _bootstrap(db: Session, user: User) -> None:
                 AgentConfig(
                     user_id=user.id, env=env, market=mkt,
                     universe=universe, trading_start=start, trading_end=end,
+                    max_order_amount=max_order,
                 )
             )
     db.commit()

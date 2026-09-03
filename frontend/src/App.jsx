@@ -4,6 +4,7 @@ import { Spinner, Toasts } from "./components/ui";
 import Shell from "./components/Shell";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
+import Portfolio from "./pages/Portfolio";
 import Agent from "./pages/Agent";
 import Trade from "./pages/Trade";
 import Orders from "./pages/Orders";
@@ -26,6 +27,7 @@ function Gate() {
     <Shell>
       <Routes>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/portfolio" element={<Portfolio />} />
         <Route path="/agent" element={<Agent />} />
         <Route path="/trade" element={<Trade />} />
         <Route path="/orders" element={<Orders />} />

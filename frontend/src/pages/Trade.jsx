@@ -1,12 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../lib/api";
 import { useApp, useAsync } from "../lib/store";
-import { signed, toneClass, won } from "../lib/format";
+import { price as fmtPrice, signed, toneClass, won } from "../lib/format";
 import { PriceSpark } from "../components/Charts";
-import { Button, Card, Field, Input, Segmented, Spinner, cx } from "../components/ui";
+import {
+  Button, Card, ErrorNote, Field, Input, Segmented, Spinner, cx,
+} from "../components/ui";
+
+/* 백엔드 시뮬레이터(brokers/mock.py)의 요율을 그대로 옮긴 값.
+   화면의 예상 수수료가 실제 체결 결과와 어긋나지 않게 한 곳을 보고 맞춘다. */
+const FEE_RATE = {
+  kr: { buy: 0.00015, sell: 0.00015 + 0.0018 },      // 위탁 0.015% (+ 매도 거래세 0.18%)
+  us: { buy: 0.0025, sell: 0.0025 + 0.0000229 },     // 0.25% (+ 매도 SEC 수수료)
+};
 
 export default function Trade() {
-  const { env, toast, isLive } = useApp();
+  const { env, toast, isLive, isUS } = useApp();
   const [symbol, setSymbol] = useState("005930");
   const [side, setSide] = useState("buy");
   const [orderType, setOrderType] = useState("limit");
@@ -20,9 +29,15 @@ export default function Trade() {
   const candles = useAsync(() => api.candles(symbol, env, 60), [symbol, env]);
   const account = useAsync(() => api.account(env), [env]);
 
+  // 다른 종목의 시세가 남아 있는 동안에는 값을 쓰지 않는다. useAsync 는 다시
+  // 불러오는 사이에도 이전 데이터를 들고 있어서, 이 가드가 없으면 종목을 바꾼 직후
+  // 잠깐 이전 종목의 가격이 새 종목의 가격인 것처럼 보인다.
+  const q = quote.data?.symbol === symbol ? quote.data : null;
+  const quoteLoading = !q && !quote.error;
+
   useEffect(() => {
-    if (quote.data && !price) setPrice(String(quote.data.price));
-  }, [quote.data, price]);
+    if (q && !price) setPrice(String(q.price));
+  }, [q, price]);
   useEffect(() => setPrice(""), [symbol]);
 
   // 시장을 바꾸면 종목 코드 체계가 달라진다(005930 ↔ AAPL).
@@ -33,11 +48,20 @@ export default function Trade() {
     if (!list.some((u) => u.symbol === symbol)) setSymbol(list[0].symbol);
   }, [universe.data, symbol]);
 
-  const q = quote.data;
+  // KIS 현재가 응답에 종목명이 비어 오는 때가 있다. 그러면 어댑터가 종목코드로
+  // 대신 채우는데, 화면에 "005930" 이 제목으로 뜨는 것보다는 유니버스가 알고 있는
+  // 이름을 쓰는 편이 낫다.
+  const listedName = universe.data?.find((u) => u.symbol === symbol)?.name;
+  const name = q ? (q.name && q.name !== q.symbol ? q.name : listedName || q.symbol) : null;
+
   const held = account.data?.holdings.find((h) => h.symbol === symbol);
   const effPrice = orderType === "market" ? q?.price ?? 0 : Number(price || 0);
   const estimate = effPrice * Number(qty || 0);
-  const fee = Math.round(estimate * (side === "buy" ? 0.00015 : 0.00195));
+  const rate = FEE_RATE[isUS ? "us" : "kr"][side];
+  // 원화는 원 단위, 달러는 센트 단위로 끊는다.
+  const fee = isUS
+    ? Math.round(estimate * rate * 100) / 100
+    : Math.round(estimate * rate);
 
   const insufficient =
     side === "buy"
@@ -85,20 +109,24 @@ export default function Trade() {
           </div>
         </Card>
 
-        <Card eyebrow="QUOTE" title={q ? q.name : "시세"}>
-          {!q ? (
-            <Spinner />
+        <Card eyebrow="QUOTE" title={name ?? "시세"}>
+          {quote.error ? (
+            <ErrorNote message={quote.error} onRetry={quote.reload} />
+          ) : quoteLoading ? (
+            <div className="py-10">
+              <Spinner label="시세 불러오는 중" />
+            </div>
           ) : (
             <>
               <div className="flex flex-wrap items-end justify-between gap-6 mb-5">
                 <div>
                   <div className={cx("num text-[34px] leading-none tracking-tight", toneClass(q.change))}>
-                    {q.price.toLocaleString("ko-KR")}
-                    <span className="text-[15px] text-muted ml-1.5">원</span>
+                    {fmtPrice(q.price)}
+                    {!isUS && <span className="text-[15px] text-muted ml-1.5">원</span>}
                   </div>
                   <div className={cx("num text-[13px] mt-2.5", toneClass(q.change))}>
                     {q.change > 0 ? "▲" : q.change < 0 ? "▼" : "—"}{" "}
-                    {Math.abs(q.change).toLocaleString("ko-KR")} ({signed(q.change_pct)})
+                    {fmtPrice(Math.abs(q.change))} ({signed(q.change_pct)})
                   </div>
                 </div>
                 <dl className="grid grid-cols-2 gap-x-8 gap-y-2 text-[12px]">
@@ -108,12 +136,12 @@ export default function Trade() {
                   ].map(([k, v]) => (
                     <div key={k} className="flex items-baseline gap-3 justify-between">
                       <dt className="text-muted">{k}</dt>
-                      <dd className="num">{v.toLocaleString("ko-KR")}</dd>
+                      <dd className="num">{fmtPrice(v)}</dd>
                     </div>
                   ))}
                 </dl>
               </div>
-              {candles.data && (
+              {candles.data && !candles.loading && (
                 <PriceSpark data={candles.data} up={q.change >= 0} height={168} />
               )}
             </>
@@ -165,8 +193,8 @@ export default function Trade() {
           </Field>
 
           {orderType === "limit" && (
-            <Field label="주문 단가" hint="원">
-              <Input type="number" mono min={0} step={10} value={price}
+            <Field label="주문 단가" hint={isUS ? "USD" : "원"}>
+              <Input type="number" mono min={0} step={isUS ? 0.01 : 10} value={price}
                 onChange={(e) => setPrice(e.target.value)} />
             </Field>
           )}
@@ -206,7 +234,7 @@ export default function Trade() {
               variant={side === "buy" ? "danger" : "primary"}
               size="lg"
               className="w-full"
-              disabled={insufficient || !qty || (orderType === "limit" && !price)}
+              disabled={!q || insufficient || !qty || (orderType === "limit" && !price)}
               onClick={() => setConfirm(true)}
             >
               {side === "buy" ? "매수" : "매도"} 주문
@@ -214,9 +242,11 @@ export default function Trade() {
           ) : (
             <div className="rounded-sm border border-line bg-raise p-4 rise">
               <p className="text-[13px] leading-relaxed mb-1">
-                <span className="font-medium">{q?.name}</span>{" "}
+                <span className="font-medium">{name}</span>{" "}
                 {Number(qty).toLocaleString("ko-KR")}주를{" "}
-                {orderType === "market" ? "시장가로" : `${Number(price).toLocaleString("ko-KR")}원에`}{" "}
+                {orderType === "market"
+                  ? "시장가로"
+                  : `${fmtPrice(Number(price))}${isUS ? "에" : "원에"}`}{" "}
                 {side === "buy" ? "매수" : "매도"}합니다.
               </p>
               <p className="text-[12px] text-muted mb-4">

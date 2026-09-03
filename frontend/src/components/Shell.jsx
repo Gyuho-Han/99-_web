@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   Activity, BarChart3, ChevronsLeft, Command, Cpu, KeyRound,
-  LayoutDashboard, LogOut, Moon, Receipt, Search, Sun,
+  LayoutDashboard, LogOut, Moon, PieChart, Receipt, Search, Sun,
 } from "lucide-react";
 import { DEMO, api } from "../lib/api";
 import { useApp } from "../lib/store";
@@ -10,6 +10,7 @@ import { cx } from "./ui";
 
 const NAV = [
   { to: "/", label: "인사이트", icon: LayoutDashboard, end: true },
+  { to: "/portfolio", label: "포트폴리오", icon: PieChart },
   { to: "/agent", label: "에이전트", icon: Cpu },
   { to: "/trade", label: "주문", icon: Activity },
   { to: "/orders", label: "거래 내역", icon: Receipt },
@@ -22,7 +23,7 @@ export default function Shell({ children }) {
   const [collapsed, setCollapsed] = useState(false);
   const current =
     NAV.find((n) => (n.end ? n.to === pathname : pathname.startsWith(n.to))) ??
-    (pathname.startsWith("/keys") ? { label: "API 키" } : null);
+    (pathname.startsWith("/keys") ? { label: "연결" } : null);
 
   return (
     <div className="min-h-full flex bg-ink">
@@ -103,9 +104,9 @@ function Rail({ collapsed, onCollapse }) {
       </div>
 
       <div className="px-2.5 pb-3 pt-2 border-t border-line space-y-1">
-        <NavLink to="/keys" title={collapsed ? "API 키" : undefined} className={item}>
+        <NavLink to="/keys" title={collapsed ? "연결" : undefined} className={item}>
           <KeyRound size={15.5} strokeWidth={1.9} className="shrink-0" />
-          {!collapsed && "API 키"}
+          {!collapsed && "연결"}
         </NavLink>
         {collapsed && (
           <button onClick={onCollapse} aria-label="메뉴 펼치기"

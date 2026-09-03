@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ACTION_LABEL, dateTime } from "../lib/format";
+import { ACTION_LABEL, dateTime, isUSD, price as fmtPrice } from "../lib/format";
 import { cx } from "./ui";
 
 /**
@@ -134,7 +134,8 @@ function SignalTooltip({ s }) {
         <div className="flex items-baseline gap-2">
           <span className="text-[13px] font-semibold">{s.symbol}</span>
           <span className="num text-[12px] text-muted">
-            {s.price.toLocaleString("ko-KR")}원
+            {fmtPrice(s.price)}
+            {!isUSD() && "원"}
           </span>
         </div>
         <span className="num text-[11px] text-muted">{dateTime(s.created_at)}</span>

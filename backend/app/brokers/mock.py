@@ -193,7 +193,10 @@ class MockBroker(BrokerAdapter):
             .one_or_none()
         )
         gross = fill_price * quantity
-        fee = round(gross * self._fee_rate, 2 if self.market == Market.us else 0)
+        cents = 2 if self.market == Market.us else 0
+        fee = round(gross * self._fee_rate, cents)
+        tax = 0.0
+        realized = 0.0
 
         if side == "buy":
             if cash_row.cash < gross + fee:
@@ -216,7 +219,11 @@ class MockBroker(BrokerAdapter):
         else:
             if pos is None or pos.quantity < quantity:
                 return OrderResult(ok=False, message="보유 수량이 부족합니다.")
-            tax = round(gross * self._tax_rate, 2 if self.market == Market.us else 0)
+            tax = round(gross * self._tax_rate, cents)
+            # 실현손익 = (체결가 - 매입평균단가) x 수량 - 매도 수수료·세금.
+            # 평균단가는 체결단가의 가중평균이라 매수 수수료는 원가에 들어 있지 않다.
+            # 평균단가를 깎기 전에 잡아 둬야 한다.
+            realized = round((fill_price - pos.avg_price) * quantity - fee - tax, cents)
             fee += tax
             cash_row.cash += gross - fee
             pos.quantity -= quantity
@@ -230,6 +237,9 @@ class MockBroker(BrokerAdapter):
             filled_quantity=quantity,
             filled_price=fill_price,
             message="체결 완료",
+            fee=fee,
+            tax=tax,
+            realized_pnl=realized,
         )
 
     def cancel_order(self, broker_order_id: str) -> OrderResult:

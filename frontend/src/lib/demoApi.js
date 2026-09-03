@@ -304,6 +304,11 @@ const state = {
 function base_cfg() {
   return {
     enabled: false,
+    risk_ack_at: null,
+    live_locked: false,
+    account_linked: false,
+    order_cooldown_seconds: 300,
+    max_daily_orders: 20,
     model_name: "heuristic-baseline",
     available_models: ["heuristic-baseline", "random"],
     universe: ["005930", "000660", "035420"],
@@ -428,15 +433,20 @@ export const demoApi = {
 
   credentials: async () => delay(state.creds),
   saveCredential: async (p) => {
+    const market = p.market ?? "kr";
     const row = {
-      id: state.creds.length + 1, broker: p.broker, env: p.env,
+      id: state.creds.length + 1, broker: p.broker, env: p.env, market,
       label: p.label || (p.env === "paper" ? "모의투자 계좌" : "실계좌"),
       app_key_masked: maskOf(p.app_key),
       account_no_masked: maskOf(p.account_no, 2, 2),
       is_active: true, last_verified_at: null, last_error: null,
       updated_at: new Date().toISOString(),
     };
-    state.creds = [...state.creds.filter((c) => c.env !== p.env), row];
+    // 저장 단위는 (환경, 시장) 조합이다. 같은 조합만 덮어쓴다.
+    state.creds = [
+      ...state.creds.filter((c) => !(c.env === p.env && (c.market ?? "kr") === market)),
+      row,
+    ];
     return delay(row);
   },
   verifyCredential: async (id) => {
@@ -454,6 +464,45 @@ export const demoApi = {
   candles: async (symbol, _env, days = 120) => delay(series(symbol).slice(-days), 60),
 
   account: async (env) => delay(accountOf(env)),
+
+  portfolio: async (env) => {
+    const a = accountOf(env);
+    const equity = a.total_equity || 1;
+    // 체결된 주문을 종목별로 묶어 실현손익과 체결 건수를 만든다. 서버와 같은 규칙이다.
+    const stats = new Map();
+    state.orders[env]
+      .filter((o) => o.status === "filled")
+      .forEach((o) => {
+        const s = stats.get(o.symbol) ?? {
+          symbol: o.symbol, name: o.name, realized_pnl: 0, trade_count: 0,
+          last_traded_at: o.created_at,
+        };
+        s.realized_pnl += o.realized_pnl ?? 0;
+        s.trade_count += 1;
+        if (o.created_at > s.last_traded_at) s.last_traded_at = o.created_at;
+        stats.set(o.symbol, s);
+      });
+
+    const held = new Set(a.holdings.map((h) => h.symbol));
+    return delay({
+      ...a,
+      holdings: a.holdings.map((h) => ({
+        ...h,
+        realized_pnl: Math.round(stats.get(h.symbol)?.realized_pnl ?? 0),
+        trade_count: stats.get(h.symbol)?.trade_count ?? 0,
+        last_traded_at: stats.get(h.symbol)?.last_traded_at ?? null,
+      })),
+      closed: [...stats.values()]
+        .filter((s) => !held.has(s.symbol))
+        .map((s) => ({ ...s, realized_pnl: Math.round(s.realized_pnl) }))
+        .sort((x, y) => (x.last_traded_at < y.last_traded_at ? 1 : -1)),
+      cash_weight_pct: +((a.cash / equity) * 100).toFixed(1),
+      realized_total: Math.round(
+        [...stats.values()].reduce((t, s) => t + s.realized_pnl, 0),
+      ),
+      realized_supported: true,
+    });
+  },
 
   orders: async (env, p = {}) => {
     let items = state.orders[env];
@@ -512,12 +561,69 @@ export const demoApi = {
   agentConfig: async (env) => delay(state.cfg[env]),
   updateAgentConfig: async (env, p) => {
     const cfg = state.cfg[env];
-    Object.entries(p).forEach(([k, v]) => {
+    // risk_ack 는 설정값이 아니라 "한도를 확인했다"는 일회성 신호다.
+    // 서버와 똑같이 저장하지 않고 확인 시각만 남긴다.
+    const { risk_ack, ...rest } = p;
+    if (risk_ack) cfg.risk_ack_at = new Date().toISOString();
+    if (rest.enabled === true && !cfg.risk_ack_at) {
+      throw new Error("자동매매를 켜기 전에 리스크 한도를 확인해야 합니다.");
+    }
+    Object.entries(rest).forEach(([k, v]) => {
       if (v === undefined || v === null) return;
       cfg[k] = k === "universe" ? String(v).split(",").filter(Boolean) : v;
     });
     cfg.updated_at = new Date().toISOString();
     return delay({ ...cfg });
+  },
+
+  connectionStatus: async (env) => {
+    const cred = state.creds.find((c) => c.env === env && (c.market ?? "kr") === "kr");
+    const cfg = state.cfg[env];
+    const step = (key, title, done, detail) => ({ key, title, done, detail, blocked: null });
+    return delay({
+      env, market: "kr", broker: "kis",
+      steps: [
+        step("register", "앱키와 계좌번호 등록", !!cred,
+          "데모 빌드에서는 실제 KIS 서버에 연결하지 않습니다. 입력값은 브라우저 안에만 남습니다."),
+        step("verify", "연결 테스트 통과", !!cred?.last_verified_at,
+          "데모 빌드에서는 항상 성공으로 처리됩니다."),
+        step("risk", "리스크 한도 확인", !!cfg.risk_ack_at,
+          "1회 주문금액·종목당 비중·일일 손실 한도·거래시간을 확인합니다."),
+        step("run", "자동매매 가동", !!cfg.enabled,
+          "가동해도 주문은 브라우저 안 시뮬레이터가 처리합니다."),
+      ],
+      matrix: ["kr", "us"].flatMap((market) =>
+        ["paper", "live"].map((e) => {
+          const c = state.creds.find((x) => x.env === e && (x.market ?? "kr") === market);
+          return {
+            market, env: e,
+            registered: !!c,
+            verified: !!c?.last_verified_at,
+            agent_enabled: market === "kr" && !!state.cfg[e].enabled,
+            locked: false,
+          };
+        }),
+      ),
+      account_linked: false,
+      market_source: "simulator",
+      live_trading_allowed: true,
+      locked: false,
+      lock_reason: null,
+      ready: !!cred?.last_verified_at,
+      open_orders: 0,
+    });
+  },
+
+  panic: async () => {
+    let disabled = 0;
+    Object.values(state.cfg).forEach((c) => {
+      if (c.enabled) { c.enabled = false; disabled += 1; }
+    });
+    return delay({
+      disabled, canceled: 0, failed: 0,
+      at: new Date().toISOString(),
+      message: `자동매매 ${disabled}건을 껐습니다.`,
+    }, 300);
   },
 
   signals: async (env, limit = 60) => delay(state.signals[env].slice(0, limit)),

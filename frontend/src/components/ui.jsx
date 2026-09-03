@@ -30,7 +30,16 @@ export function Card({ title, eyebrow, action, children, className, style, pad =
           {action}
         </header>
       )}
-      <div className={cx("flex-1 min-h-0", pad && "px-5 pb-5")}>{children}</div>
+      {/* 헤더가 없는 카드는 본문이 상단 여백까지 책임진다. 예전에는 이게 없어서
+          화면마다 <div className="pt-1"> 을 덧대 4px 로 버티고 있었다. */}
+      <div
+        className={cx(
+          "flex-1 min-h-0",
+          pad && (title || action ? "px-5 pb-5" : "p-5"),
+        )}
+      >
+        {children}
+      </div>
     </section>
   );
 }
@@ -236,12 +245,16 @@ export function Stat({ label, value, badge, delta, tone, sub, size = 30 }) {
       <div className={cx("leading-none", toneCls)} style={{ fontSize: size }}>
         {value}
       </div>
-      {(delta || sub) && (
+      {/* 숫자 0 은 falsy 라서 `delta && ...` 로 쓰면 JSX 가 "0" 을 그대로 그린다.
+          빈 값과 0 을 구분하려면 null 검사여야 한다. */}
+      {(delta != null && delta !== "") || sub ? (
         <div className="mt-2.5 flex items-center gap-2 text-[12px]">
-          {delta && <span className={cx("num", toneCls)}>{delta}</span>}
+          {delta != null && delta !== "" && (
+            <span className={cx("num", toneCls)}>{delta}</span>
+          )}
           {sub && <span className="text-muted">{sub}</span>}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

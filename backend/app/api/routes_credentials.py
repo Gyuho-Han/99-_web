@@ -16,7 +16,7 @@ from app.brokers.kis import KISBroker
 from app.brokers.kis_overseas import KISOverseasBroker
 from app.core.security import decrypt_secret, encrypt_secret, mask
 from app.db.session import get_db
-from app.models import AuditLog, BrokerCredential, Env, Market, User
+from app.models import AuditLog, BrokerCredential, Env, Market, User, utcnow
 from app.schemas import CredentialIn, CredentialOut, VerifyOut
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
@@ -69,7 +69,7 @@ def upsert_credential(
     cred.account_no_enc = encrypt_secret(payload.account_no.strip())
     cred.is_active = True
     cred.last_error = None
-    cred.updated_at = datetime.now()
+    cred.updated_at = utcnow()
 
     db.add(AuditLog(user_id=user.id, event="credential.upsert", detail=f"{payload.broker}/{env.value}/{mkt.value}"))
     db.commit()
@@ -93,7 +93,7 @@ def verify_credential(
         is_paper=(cred.env == Env.paper),
     )
     ok, message = broker.verify()
-    cred.last_verified_at = datetime.now() if ok else cred.last_verified_at
+    cred.last_verified_at = utcnow() if ok else cred.last_verified_at
     cred.last_error = None if ok else message
     db.add(AuditLog(user_id=user.id, event="credential.verify", detail=f"{cred.env.value}/{cred.market.value}:{ok}"))
     db.commit()

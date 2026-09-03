@@ -81,6 +81,30 @@ class Balance:
         return self.cash + self.holdings_value
 
 
+class BrokerError(RuntimeError):
+    """증권사 쪽 문제로 요청이 실패했다.
+
+    우리 코드의 버그(TypeError 같은 것)와 구분하려고 따로 둔다. 라우터는 이 예외만
+    502로 바꿔 짧은 메시지를 내보내고, 나머지 예외는 원래대로 500과 스택트레이스를
+    남긴다. 증권사가 잠깐 흔들린 것을 우리 버그처럼 보이게 하지 않기 위해서다.
+    """
+
+
+@dataclass
+class Fill:
+    """접수된 주문의 현재 체결 상태.
+
+    증권사 주문 API는 "접수했다"까지만 알려 준다. 얼마나 체결됐는지는 체결조회를
+    따로 불러야 알 수 있어서, 그 결과를 담는 그릇이 하나 필요하다.
+    """
+
+    broker_order_id: str
+    ordered_quantity: int = 0
+    filled_quantity: int = 0
+    filled_price: float = 0.0     # 체결 평균단가
+    canceled: bool = False
+
+
 @dataclass
 class OrderResult:
     ok: bool
@@ -88,6 +112,13 @@ class OrderResult:
     filled_quantity: int = 0
     filled_price: float = 0.0
     message: str = ""
+
+    # 아래 셋은 즉시 체결되는 시뮬레이터만 채운다. 실제 증권사는 접수까지만
+    # 알려 주므로 0으로 남고, 체결 폴링도 실현손익은 채우지 않는다
+    # (매도 시점의 취득단가를 증권사 잔고가 갖고 있어서다 — services/fills.py 참고).
+    fee: float = 0.0
+    tax: float = 0.0
+    realized_pnl: float = 0.0
 
 
 class BrokerAdapter(ABC):
@@ -125,3 +156,14 @@ class BrokerAdapter(ABC):
     @abstractmethod
     def cancel_order(self, broker_order_id: str) -> OrderResult:
         """주문 취소."""
+
+    def get_fills(self, broker_order_ids: list[str]) -> dict[str, Fill]:
+        """접수된 주문들의 체결 상태를 한 번에 조회한다.
+
+        추상 메서드가 아니라 기본 구현을 둔 이유: 시뮬레이터 어댑터는 주문을 내는
+        즉시 체결시키므로 미체결이라는 상태 자체가 없다. 조회할 것이 없는 어댑터는
+        이 기본 구현(빈 dict)을 그대로 쓰면 된다.
+
+        반환값은 broker_order_id -> Fill. 조회되지 않은 주문은 키가 없다.
+        """
+        return {}

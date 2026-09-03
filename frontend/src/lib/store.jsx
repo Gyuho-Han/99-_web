@@ -35,7 +35,15 @@ export function AppProvider({ children }) {
   const [session, setSession] = useState(null);
   const [ready, setReady] = useState(false);
   const [env, setEnvState] = useState(() => store.get("kairo.env") || "paper");
-  const [market, setMarketState] = useState(() => store.get("kairo.market") || "kr");
+  const [market, setMarketState] = useState(() => {
+    // 새로고침으로 되살아난 시장은 첫 렌더 '전에' 반영해야 한다. 아래 useEffect 로만
+    // 맞추면 첫 렌더는 기본값(KRW)으로 그려지고, 그 뒤 setCurrency 는 모듈 변수만
+    // 바꾸므로 다시 그려지지 않는다. 미국 시장인데 금액이 원으로 남아 있던 원인이다.
+    const m = store.get("kairo.market") === "us" ? "us" : "kr";
+    setApiMarket(m);
+    setCurrency(m === "us" ? "USD" : "KRW");
+    return m;
+  });
   const [theme, setTheme] = useState(() => store.get("kairo.theme") || "dark");
   const [toasts, setToasts] = useState([]);
 

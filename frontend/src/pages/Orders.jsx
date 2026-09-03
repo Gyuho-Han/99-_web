@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ChevronLeft, ChevronRight, Download, Receipt } from "lucide-react";
 import { api } from "../lib/api";
 import { useApp, useAsync } from "../lib/store";
-import { STATUS_LABEL, dateTime, signedWon, toneClass } from "../lib/format";
+import { STATUS_LABEL, dateTime, price as fmtPrice, signedWon, toneClass } from "../lib/format";
 import { Badge, Button, Card, Empty, ErrorNote, Segmented, Select, Spinner, cx } from "../components/ui";
 
 export default function Orders() {
@@ -137,12 +137,12 @@ export default function Orders() {
                         </div>
                       </td>
                       <td className="py-3 text-right num">{o.quantity.toLocaleString("ko-KR")}</td>
-                      <td className="py-3 text-right num">{o.price.toLocaleString("ko-KR")}</td>
+                      <td className="py-3 text-right num">{fmtPrice(o.price)}</td>
                       <td className="py-3 text-right num">
-                        {o.filled_price ? o.filled_price.toLocaleString("ko-KR") : "—"}
+                        {o.filled_price ? fmtPrice(o.filled_price) : "—"}
                       </td>
                       <td className="py-3 text-right num text-muted">
-                        {o.fee ? o.fee.toLocaleString("ko-KR") : "—"}
+                        {o.fee ? fmtPrice(o.fee) : "—"}
                       </td>
                       <td className={cx("py-3 text-right num", toneClass(o.realized_pnl))}>
                         {o.realized_pnl ? signedWon(o.realized_pnl) : "—"}

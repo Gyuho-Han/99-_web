@@ -106,15 +106,13 @@ function Headline({ label, value, tone, sub, small }) {
   const cls = tone > 0 ? "text-up" : tone < 0 ? "text-down" : "text-body";
   return (
     <Card>
-      <div className="pt-1">
-        <div className="text-[12.5px] text-muted mb-3">{label}</div>
-        <div className={cx("num text-[26px] leading-none tracking-tight", cls)}>{value}</div>
-        {sub && (
-          <p className={cx("mt-2.5 text-muted leading-relaxed", small ? "text-[11px]" : "text-[12px] num")}>
-            {sub}
-          </p>
-        )}
-      </div>
+      <div className="text-[12.5px] text-muted mb-3">{label}</div>
+      <div className={cx("num text-[26px] leading-none tracking-tight", cls)}>{value}</div>
+      {sub && (
+        <p className={cx("mt-2.5 text-muted leading-relaxed", small ? "text-[11px]" : "text-[12px] num")}>
+          {sub}
+        </p>
+      )}
     </Card>
   );
 }

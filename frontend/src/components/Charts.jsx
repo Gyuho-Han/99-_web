@@ -12,7 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { dateShort, signed, wonShort } from "../lib/format";
+import { dateShort, signed, won, wonShort } from "../lib/format";
 
 const axis = {
   stroke: "var(--line)",
@@ -65,13 +65,13 @@ export function EquityChart({ data, height = 260, showBenchmark = true }) {
               <Frame label={label}>
                 <Row
                   name="에이전트"
-                  value={`${payload[0].value.toLocaleString("ko-KR")}원`}
+                  value={won(payload[0].value)}
                   color="var(--brand)"
                 />
                 {showBenchmark && payload[1] && (
                   <Row
                     name="Buy & Hold"
-                    value={`${payload[1].value.toLocaleString("ko-KR")}원`}
+                    value={won(payload[1].value)}
                     color="var(--muted)"
                   />
                 )}

@@ -1,9 +1,28 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, PlainSerializer
+
+
+# ---------------------------------------------------------------------------
+# 시각은 UTC임을 명시해서 내보낸다.
+#
+# DB 컬럼(SQLite DATETIME)은 타임존을 갖지 않고 값은 UTC로 들어간다. 그대로
+# 직렬화하면 "2026-09-03T08:58:43" 처럼 나가고, 브라우저의 new Date() 는 이것을
+# 로컬 시각으로 읽는다. 한국에서는 거래 시각이 9시간 전으로 보인다.
+# 끝에 Z를 붙여 UTC임을 알려 주면 화면이 알아서 로컬로 환산한다.
+# ---------------------------------------------------------------------------
+def _as_utc_iso(v: datetime | None) -> str | None:
+    if v is None:
+        return None
+    if v.tzinfo is None:
+        v = v.replace(tzinfo=timezone.utc)
+    return v.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+UtcTime = Annotated[datetime, PlainSerializer(_as_utc_iso, return_type=str)]
 
 
 # -- 인증 -------------------------------------------------------------------
@@ -53,9 +72,9 @@ class CredentialOut(BaseModel):
     app_key_masked: str
     account_no_masked: str
     is_active: bool
-    last_verified_at: datetime | None
+    last_verified_at: UtcTime | None
     last_error: str | None
-    updated_at: datetime
+    updated_at: UtcTime
 
 
 class VerifyOut(BaseModel):
@@ -77,6 +96,8 @@ class QuoteOut(BaseModel):
     high: float
     low: float
     volume: int
+    # 현재가 조회 시각. DB에 저장되는 값이 아니라 어댑터가 응답을 만들 때 찍는
+    # 로컬 시각이라, 저장 시각(UTC)과 달리 그대로 내보낸다.
     ts: datetime
 
 
@@ -119,6 +140,33 @@ class AccountOut(BaseModel):
     holdings: list[HoldingOut]
 
 
+class PositionStat(BaseModel):
+    """거래했던 종목의 누적 기록. 지금 보유 중이 아니어도 남는다."""
+
+    symbol: str
+    name: str
+    realized_pnl: float
+    trade_count: int
+    last_traded_at: UtcTime | None = None
+
+
+class PortfolioHolding(HoldingOut):
+    realized_pnl: float = 0.0
+    trade_count: int = 0
+    last_traded_at: UtcTime | None = None
+
+
+class PortfolioOut(AccountOut):
+    holdings: list[PortfolioHolding]
+    # 지금은 갖고 있지 않지만 거래한 적 있는 종목
+    closed: list[PositionStat]
+    cash_weight_pct: float
+    realized_total: float
+    # 실현손익을 신뢰할 수 있는 상태인지. 실계좌 체결은 취득단가를 증권사가 갖고 있어
+    # 우리가 채우지 않으므로 False가 된다. 화면이 0원을 사실처럼 보여 주면 안 된다.
+    realized_supported: bool
+
+
 # -- 주문 -------------------------------------------------------------------
 class OrderIn(BaseModel):
     symbol: str
@@ -144,8 +192,8 @@ class OrderOut(BaseModel):
     status: str
     source: str
     note: str | None
-    created_at: datetime
-    filled_at: datetime | None
+    created_at: UtcTime
+    filled_at: UtcTime | None
 
     class Config:
         from_attributes = True
@@ -179,12 +227,17 @@ class PerformanceOut(BaseModel):
 # -- 에이전트 ---------------------------------------------------------------
 class AgentConfigIn(BaseModel):
     enabled: bool | None = None
+    # 자동매매를 켤 때 한 번만 필요한 플래그. 리스크 한도를 확인했다는 뜻이며
+    # 설정으로 저장되지 않는다 (AgentConfig.risk_ack_at 시각만 남는다).
+    risk_ack: bool = False
     model_name: str | None = None
     universe: str | None = None
     max_position_pct: float | None = Field(default=None, ge=1, le=100)
     max_order_amount: float | None = Field(default=None, ge=10_000)
     daily_loss_limit_pct: float | None = Field(default=None, ge=0.5, le=50)
     confidence_threshold: float | None = Field(default=None, ge=0, le=1)
+    order_cooldown_seconds: int | None = Field(default=None, ge=0, le=86_400)
+    max_daily_orders: int | None = Field(default=None, ge=1, le=1_000)
     trading_start: str | None = None
     trading_end: str | None = None
 
@@ -193,6 +246,9 @@ class AgentConfigOut(BaseModel):
     env: str
     market: str
     enabled: bool
+    risk_ack_at: UtcTime | None = None
+    live_locked: bool = False
+    account_linked: bool = False
     model_name: str
     available_models: list[str]
     universe: list[str]
@@ -200,9 +256,11 @@ class AgentConfigOut(BaseModel):
     max_order_amount: float
     daily_loss_limit_pct: float
     confidence_threshold: float
+    order_cooldown_seconds: int
+    max_daily_orders: int
     trading_start: str
     trading_end: str
-    updated_at: datetime
+    updated_at: UtcTime
 
 
 class SignalOut(BaseModel):
@@ -216,7 +274,7 @@ class SignalOut(BaseModel):
     price: float
     executed: bool
     reason: str | None
-    created_at: datetime
+    created_at: UtcTime
 
     class Config:
         from_attributes = True

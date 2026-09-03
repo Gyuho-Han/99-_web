@@ -170,8 +170,20 @@ class AgentConfig(Base):
     max_order_amount: Mapped[float] = mapped_column(Float, default=2_000_000)
     daily_loss_limit_pct: Mapped[float] = mapped_column(Float, default=3.0)
     confidence_threshold: Mapped[float] = mapped_column(Float, default=0.55)
+
+    # 같은 종목에 다시 주문하기까지 기다리는 시간(초).
+    # 규칙 기반 정책은 조건이 유지되는 한 매 틱 같은 신호를 낸다. 이 값이 없으면
+    # 루프 주기(기본 5초)마다 같은 주문이 계속 나간다.
+    order_cooldown_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    # 하루에 이 에이전트가 낼 수 있는 주문 건수 상한. 마지막 그물이다.
+    max_daily_orders: Mapped[int] = mapped_column(Integer, default=20)
     trading_start: Mapped[str] = mapped_column(String(5), default="09:05")
     trading_end: Mapped[str] = mapped_column(String(5), default="15:15")
+
+    # 사용자가 이 (env, market) 조합의 리스크 한도를 눈으로 확인하고 동의한 시각.
+    # 값이 없으면 자동매매를 켤 수 없다. 한도를 한 번도 안 본 채로 스위치만
+    # 올리는 일을 막는 것이 목적이다.
+    risk_ack_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

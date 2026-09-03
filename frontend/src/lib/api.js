@@ -70,6 +70,10 @@ const httpApi = {
   signup: (payload) => request("/auth/signup", { method: "POST", body: payload }),
   me: () => request("/auth/me"),
 
+  // 연결 상태 · 비상정지
+  connectionStatus: (env) => request("/connection/status", { params: { env } }),
+  panic: () => request("/agent/panic", { method: "POST" }),
+
   // 자격증명
   credentials: () => request("/credentials"),
   saveCredential: (payload) => request("/credentials", { method: "PUT", body: payload }),
@@ -85,6 +89,7 @@ const httpApi = {
 
   // 계좌 · 주문
   account: (env) => request("/account", { params: { env } }),
+  portfolio: (env) => request("/portfolio", { params: { env } }),
   orders: (env, params = {}) => request("/orders", { params: { env, ...params } }),
   placeOrder: (env, payload) => request("/orders", { method: "POST", params: { env }, body: payload }),
   cancelOrder: (env, id) => request(`/orders/${id}`, { method: "DELETE", params: { env } }),

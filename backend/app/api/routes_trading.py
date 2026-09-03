@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_user, env_param, market_param
@@ -13,8 +13,19 @@ from app.brokers import market as market_source
 from app.brokers import us_universe
 from app.brokers.factory import get_broker, is_live_broker, market_source_of
 from app.brokers.mock import UNIVERSE
+from app.core.guard import LIVE_LOCK_MESSAGE, live_locked
 from app.db.session import get_db
-from app.models import CashAccount, EquitySnapshot, Env, Market, Order, OrderStatus, Side, User
+from app.models import (
+    CashAccount,
+    EquitySnapshot,
+    Env,
+    Market,
+    Order,
+    OrderStatus,
+    Side,
+    User,
+    utcnow,
+)
 from app.schemas import (
     AccountOut,
     CandleOut,
@@ -22,6 +33,9 @@ from app.schemas import (
     OrderIn,
     OrderOut,
     OrderPage,
+    PortfolioHolding,
+    PortfolioOut,
+    PositionStat,
     QuoteOut,
 )
 
@@ -89,13 +103,11 @@ def candles(
 
 
 # -- 계좌 -------------------------------------------------------------------
-@router.get("/account", response_model=AccountOut)
-def account(
-    env: Env = Depends(env_param),
-    mkt: Market = Depends(market_param),
-    user: User = Depends(current_user),
-    db: Session = Depends(get_db),
-):
+def _account_fields(db: Session, user: User, env: Env, mkt: Market) -> dict:
+    """AccountOut 에 들어갈 값을 한 번에 만든다.
+
+    /account 와 /portfolio 가 같은 숫자를 보여야 하므로 계산은 여기 한 곳에만 둔다.
+    """
     broker = get_broker(db, user.id, env, mkt)
     bal = broker.get_balance()
     equity = bal.total_equity
@@ -132,22 +144,103 @@ def account(
         )
         for h in bal.holdings
     ]
-    return AccountOut(
-        env=env.value,
-        market=mkt.value,
-        currency=bal.currency,
-        connected=is_live_broker(db, user.id, env, mkt),
-        broker=broker.name,
-        cash=money(bal.cash),
-        holdings_value=money(bal.holdings_value),
-        total_equity=money(equity),
-        deposit_total=money(deposit),
-        total_pnl=money(equity - deposit),
-        total_pnl_pct=round((equity / deposit - 1) * 100, 2) if deposit else 0.0,
-        day_pnl=money(day_pnl),
-        day_pnl_pct=round(day_pnl_pct, 2),
-        holdings=holdings,
+    return {
+        "env": env.value,
+        "market": mkt.value,
+        "currency": bal.currency,
+        "connected": is_live_broker(db, user.id, env, mkt),
+        "broker": broker.name,
+        "cash": money(bal.cash),
+        "holdings_value": money(bal.holdings_value),
+        "total_equity": money(equity),
+        "deposit_total": money(deposit),
+        "total_pnl": money(equity - deposit),
+        "total_pnl_pct": round((equity / deposit - 1) * 100, 2) if deposit else 0.0,
+        "day_pnl": money(day_pnl),
+        "day_pnl_pct": round(day_pnl_pct, 2),
+        "holdings": holdings,
+    }
+
+
+@router.get("/account", response_model=AccountOut)
+def account(
+    env: Env = Depends(env_param),
+    mkt: Market = Depends(market_param),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    return AccountOut(**_account_fields(db, user, env, mkt))
+
+
+@router.get("/portfolio", response_model=PortfolioOut)
+def portfolio(
+    env: Env = Depends(env_param),
+    mkt: Market = Depends(market_param),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """보유 종목 + 종목별 누적 기록.
+
+    /account 가 "지금 얼마인가"라면 이쪽은 "무엇을 얼마나, 그동안 어땠나"이다.
+    체결된 주문을 종목별로 묶어 실현손익과 체결 건수를 붙이고, 지금은 보유하지
+    않지만 거래한 적 있는 종목도 따로 돌려준다.
+    """
+    fields = _account_fields(db, user, env, mkt)
+
+    stats = {
+        row.symbol: row
+        for row in db.query(
+            Order.symbol.label("symbol"),
+            func.max(Order.name).label("name"),
+            func.coalesce(func.sum(Order.realized_pnl), 0.0).label("realized_pnl"),
+            func.count(Order.id).label("trade_count"),
+            func.max(Order.created_at).label("last_traded_at"),
+        )
+        .filter_by(user_id=user.id, env=env, market=mkt, status=OrderStatus.filled)
+        .group_by(Order.symbol)
+        .all()
+    }
+
+    digits = 2 if mkt == Market.us else 0
+    money = lambda v: round(v, digits) if digits else round(v)  # noqa: E731
+
+    holdings = []
+    for h in fields["holdings"]:
+        st = stats.get(h.symbol)
+        holdings.append(
+            PortfolioHolding(
+                **h.model_dump(),
+                realized_pnl=money(st.realized_pnl) if st else 0.0,
+                trade_count=st.trade_count if st else 0,
+                last_traded_at=st.last_traded_at if st else None,
+            )
+        )
+
+    held = {h.symbol for h in fields["holdings"]}
+    closed = [
+        PositionStat(
+            symbol=st.symbol,
+            name=st.name or st.symbol,
+            realized_pnl=money(st.realized_pnl),
+            trade_count=st.trade_count,
+            last_traded_at=st.last_traded_at,
+        )
+        for sym, st in stats.items()
+        if sym not in held
+    ]
+    closed.sort(key=lambda c: c.last_traded_at or datetime.min, reverse=True)
+
+    equity = fields["total_equity"] or 1
+    fields["holdings"] = holdings
+    return PortfolioOut(
+        **fields,
+        closed=closed,
+        cash_weight_pct=round(fields["cash"] / equity * 100, 1),
+        realized_total=money(sum(st.realized_pnl for st in stats.values())),
+        # 실계좌 체결은 취득단가를 증권사가 갖고 있어 실현손익을 채우지 않는다.
+        realized_supported=not fields["connected"],
     )
+
 
 
 # -- 주문 -------------------------------------------------------------------
@@ -197,6 +290,10 @@ def place_order(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    # 실계좌 잠금은 브로커를 만들기 전에 본다. 잠겨 있으면 KIS를 두드리지도 않는다.
+    if live_locked(env):
+        raise HTTPException(423, LIVE_LOCK_MESSAGE)
+
     broker = get_broker(db, user.id, env, mkt)
     quote = broker.get_quote(payload.symbol)
     res = broker.place_order(
@@ -211,9 +308,10 @@ def place_order(
         order_type=payload.order_type, quantity=payload.quantity,
         price=payload.price or quote.price,
         filled_quantity=res.filled_quantity, filled_price=res.filled_price,
+        fee=res.fee, tax=res.tax, realized_pnl=res.realized_pnl,
         status=OrderStatus.filled if res.filled_quantity else OrderStatus.pending,
         source="manual", note=res.message,
-        filled_at=datetime.now() if res.filled_quantity else None,
+        filled_at=utcnow() if res.filled_quantity else None,
     )
     db.add(order)
     db.commit()

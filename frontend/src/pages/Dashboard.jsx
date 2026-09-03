@@ -55,56 +55,48 @@ export default function Dashboard() {
       {/* KPI 4종 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <Card className="rise">
-          <div className="pt-1">
-            <Stat
-              label="총 평가자산"
-              value={<Money value={a.total_equity} size={30} />}
-              badge={
-                <Badge tone={toneOf(a.day_pnl)}>
-                  {signed(a.day_pnl_pct)}
-                </Badge>
-              }
-              sub={`현금 ${won(a.cash)}`}
-            />
-          </div>
+          <Stat
+            label="총 평가자산"
+            value={<Money value={a.total_equity} size={30} />}
+            badge={
+              <Badge tone={toneOf(a.day_pnl)}>
+                {signed(a.day_pnl_pct)}
+              </Badge>
+            }
+            sub={`현금 ${won(a.cash)}`}
+          />
         </Card>
 
         <Card className="rise" style={{ animationDelay: "60ms" }}>
-          <div className="pt-1">
-            <Stat
-              label="오늘 손익"
-              value={<Money value={a.day_pnl} size={30} />}
-              tone={toneOf(a.day_pnl)}
-              sub="전 영업일 종가 대비"
-            />
-          </div>
+          <Stat
+            label="오늘 손익"
+            value={<Money value={a.day_pnl} size={30} />}
+            tone={toneOf(a.day_pnl)}
+            sub="전 영업일 종가 대비"
+          />
         </Card>
 
         <Card className="rise">
-          <div className="pt-1">
-            <Stat
-              label="누적 손익"
-              value={<Money value={a.total_pnl} size={30} />}
-              tone={toneOf(a.total_pnl)}
-              badge={<Badge tone={toneOf(a.total_pnl)}>{signed(a.total_pnl_pct)}</Badge>}
-              sub={`원금 ${won(a.deposit_total)}`}
-            />
-          </div>
+          <Stat
+            label="누적 손익"
+            value={<Money value={a.total_pnl} size={30} />}
+            tone={toneOf(a.total_pnl)}
+            badge={<Badge tone={toneOf(a.total_pnl)}>{signed(a.total_pnl_pct)}</Badge>}
+            sub={`원금 ${won(a.deposit_total)}`}
+          />
         </Card>
 
         <Card className="rise">
-          <div className="pt-1">
-            <Stat
-              label="위험조정 성과"
-              value={
-                <span className="num tracking-tight">
-                  {m ? m.sharpe.toFixed(2) : "—"}
-                  <span className="text-[13px] text-muted ml-2">Sharpe</span>
-                </span>
-              }
-              sub={m ? `최대 낙폭 ${m.max_drawdown_pct.toFixed(2)}%` : ""}
-            />
-          </div>
+          <Stat
+            label="위험조정 성과"
+            value={
+              <span className="num tracking-tight">
+                {m ? m.sharpe.toFixed(2) : "—"}
+                <span className="text-[13px] text-muted ml-2">Sharpe</span>
+              </span>
+            }
+            sub={m ? `최대 낙폭 ${m.max_drawdown_pct.toFixed(2)}%` : ""}
+          />
         </Card>
       </div>
 
@@ -243,9 +235,9 @@ export default function Dashboard() {
                         <div className="num text-[11px] text-muted mt-0.5">{h.symbol}</div>
                       </td>
                       <Td>{h.quantity.toLocaleString("ko-KR")}</Td>
-                      <Td>{h.avg_price.toLocaleString("ko-KR")}</Td>
-                      <Td>{h.current_price.toLocaleString("ko-KR")}</Td>
-                      <Td>{h.market_value.toLocaleString("ko-KR")}</Td>
+                      <Td>{won(h.avg_price)}</Td>
+                      <Td>{won(h.current_price)}</Td>
+                      <Td>{won(h.market_value)}</Td>
                       <Td className={toneClass(h.unrealized_pnl)}>
                         {signedWon(h.unrealized_pnl)}
                         <div className="text-[11px] mt-0.5">{signed(h.unrealized_pct)}</div>
