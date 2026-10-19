@@ -309,8 +309,11 @@ function base_cfg() {
     account_linked: false,
     order_cooldown_seconds: 300,
     max_daily_orders: 20,
-    model_name: "heuristic-baseline",
-    available_models: ["heuristic-baseline", "random"],
+    model_name: "dqn-seed-ensemble-qa",
+    available_models: [
+      "dqn-seed-ensemble-qa", "dqn-seed-ensemble-mv",
+      "dqn-seed-1", "dqn-seed-7", "dqn-seed-21", "dqn-seed-42", "dqn-seed-100",
+    ],
     universe: ["005930", "000660", "035420"],
     max_position_pct: 30,
     max_order_amount: 2_000_000,

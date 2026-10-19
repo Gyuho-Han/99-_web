@@ -163,7 +163,8 @@ class AgentConfig(Base):
     market: Mapped[Market] = mapped_column(Enum(Market), default=Market.kr, index=True)
 
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    model_name: Mapped[str] = mapped_column(String(64), default="ppo-ensemble-v0")
+    # 시드 앙상블 DQN — Q값 평균(논문 식 3). 목록은 app/agent/policy.py 레지스트리.
+    model_name: Mapped[str] = mapped_column(String(64), default="dqn-seed-ensemble-qa")
     universe: Mapped[str] = mapped_column(Text, default="005930")  # 콤마 구분 종목코드
 
     max_position_pct: Mapped[float] = mapped_column(Float, default=30.0)   # 종목당 최대 비중(%)
@@ -200,6 +201,8 @@ class AgentSignal(Base):
     symbol: Mapped[str] = mapped_column(String(20), index=True)
     action: Mapped[AgentAction] = mapped_column(Enum(AgentAction))
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    # 목표 비중 정책(시드 앙상블 DQN)은 q_buy=Q(비중 100%), q_hold=Q(50%), q_sell=Q(0%).
+    # 앙상블이면 시드 모델 간 평균 Q값이다.
     q_buy: Mapped[float] = mapped_column(Float, default=0.0)
     q_hold: Mapped[float] = mapped_column(Float, default=0.0)
     q_sell: Mapped[float] = mapped_column(Float, default=0.0)

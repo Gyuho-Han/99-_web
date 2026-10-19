@@ -7,6 +7,12 @@
 
 국내(kr)와 미국(us)은 같은 루프를 쓰되 설정이 시장별로 따로 있다. 미국 정규장은
 한국 시간으로 밤을 넘기므로 거래 시간 판정이 자정을 넘는 구간을 지원한다.
+
+시드 앙상블 DQN(논문)은 '목표 주식 비중'을 낸다. 이 경우 주문 수량은
+목표 수량 floor(w × 총자산 ÷ 현재가) 와 현재 보유 수량의 차이다
+(auto_trading PaperBroker.rebalance 와 같은 식). 논문은 하루 한 번 시가에 리밸런싱하므로
+종목마다 하루 한 번만 주문한다. 신뢰도 임계값은 논문 규칙에 없으므로 목표 비중 정책에는
+적용하지 않는다(나머지 리스크 게이트는 모두 그대로 적용).
 """
 
 from __future__ import annotations
@@ -18,7 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
-from app.agent.policy import Observation, compute_features, get_policy
+from app.agent.policy import Observation, get_policy
 from app.brokers.factory import get_broker
 from app.core.config import settings
 from app.core.guard import live_locked
@@ -88,6 +94,16 @@ def _today_start_utc() -> datetime:
     return local_midnight.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+# 목표 비중 매수 수량을 정할 때 얹는 매수 비용 여유분. 국내 위탁수수료(0.015% 안팎)보다
+# 넉넉하게 잡아, 예수금이 수수료만큼 모자라 주문이 거부되는 일을 막는다.
+BUY_COST_BUFFER = 0.0005
+
+# 목표 비중 정책의 '오늘 결정 완료' 표시. (user, env, market, symbol) -> 날짜.
+# 목표 수량과 보유 수량이 같아 주문할 것이 없었던 날도 여기에 남겨, 장중 가격 변화로
+# 목표 수량이 1주씩 흔들릴 때마다 사고팔지 않게 한다. 주문을 낸 날은 DB 로도 확인한다.
+_rebalanced_on: dict[tuple[int, str, str, str], date] = {}
+
+
 def _within_hours(cfg: AgentConfig) -> bool:
     """거래 시간 판정. 미국장처럼 자정을 넘는 구간(22:35~04:55)도 지원한다."""
     now = datetime.now().strftime("%H:%M")
@@ -146,9 +162,12 @@ def step_once(
         if s.strip()
     ]
 
+    policy = get_policy(cfg.model_name)
+    lookback = getattr(policy, "candle_lookback", 90)
+
     for symbol in symbols:
         try:
-            candles = broker.get_candles(symbol, 90)
+            candles = broker.get_candles(symbol, lookback)
             quote = broker.get_quote(symbol)
         except Exception as e:  # noqa: BLE001
             _note_quote_failure(user_id, market, symbol, e)
@@ -163,11 +182,13 @@ def step_once(
             cash_ratio=balance.cash / equity,
             position_ratio=(h.market_value / equity) if h else 0.0,
             unrealized_pct=h.unrealized_pct if h else 0.0,
-            sentiment=0.0,  # TODO: KR-FinBert-SC 일별 집계값 주입
-            features=compute_features(candles),
+            quantity=h.quantity if h else 0,
+            equity=equity,
         )
 
-        out = get_policy(cfg.model_name).act(obs)
+        out = policy.act(obs)
+        weight_policy = out.target_weight is not None
+        day_key = (user_id, env.value, market.value, quote.symbol)
         signal = AgentSignal(
             user_id=user_id,
             env=env,
@@ -195,11 +216,13 @@ def step_once(
                 raise RiskBlocked("실계좌 주문 잠금 (ALLOW_LIVE_TRADING=false)")
             if not cfg.risk_ack_at:
                 raise RiskBlocked("리스크 한도 확인 전")
-            if out.action == "hold":
+            if weight_policy and _rebalanced_on.get(day_key) == date.today():
+                raise RiskBlocked("오늘 리밸런싱 완료")
+            if not weight_policy and out.action == "hold":
                 raise RiskBlocked("관망")
             if not _within_hours(cfg):
                 raise RiskBlocked(f"거래 시간 밖 ({cfg.trading_start}~{cfg.trading_end})")
-            if out.confidence < cfg.confidence_threshold:
+            if not weight_policy and out.confidence < cfg.confidence_threshold:
                 raise RiskBlocked(
                     f"신뢰도 {out.confidence:.2f} < 임계값 {cfg.confidence_threshold:.2f}"
                 )
@@ -219,6 +242,16 @@ def step_once(
             if open_count:
                 raise RiskBlocked(f"{quote.symbol} 미체결 주문 {open_count}건이 남아 있음")
 
+            if weight_policy:
+                done_today = base.filter(
+                    Order.source == "agent",
+                    Order.status != OrderStatus.rejected,
+                    Order.created_at >= _today_start_utc(),
+                ).count()
+                if done_today:
+                    _rebalanced_on[day_key] = date.today()
+                    raise RiskBlocked("오늘 리밸런싱 완료")
+
             if cfg.order_cooldown_seconds > 0:
                 since = _now_utc() - timedelta(seconds=cfg.order_cooldown_seconds)
                 if base.filter(Order.created_at >= since).count():
@@ -235,7 +268,38 @@ def step_once(
             if today_orders >= cfg.max_daily_orders:
                 raise RiskBlocked(f"일일 주문 건수 한도 {cfg.max_daily_orders}건 도달")
 
-            if out.action == "buy":
+            if weight_policy:
+                if quote.price <= 0:
+                    raise RiskBlocked("현재가를 알 수 없음")
+                held_qty = h.quantity if h else 0
+                # 목표 수량: floor(w × 총자산 ÷ 가격). 종목당 최대 비중 한도로 한 번 더 자른다.
+                target_qty = int((out.target_weight * equity) // quote.price)
+                cap_qty = int((equity * cfg.max_position_pct / 100) // quote.price)
+                target_qty = min(target_qty, cap_qty)
+                change = target_qty - held_qty
+                if change == 0:
+                    out.action = "hold"
+                    signal.action = AgentAction.hold
+                    _rebalanced_on[day_key] = date.today()
+                    raise RiskBlocked(
+                        f"목표 비중 {out.target_weight:.0%} → 목표 {target_qty}주 = 보유 {held_qty}주"
+                    )
+                if change > 0:
+                    # 예수금 전부로 사는 날(목표 100%)에도 수수료 때문에 거부되지 않게
+                    # PaperBroker 처럼 수수료를 얹은 단가로 살 수 있는 수량까지만 낸다.
+                    budget = min(cfg.max_order_amount, balance.cash)
+                    unit_cost = quote.price * (1 + BUY_COST_BUFFER)
+                    qty = min(change, int(budget // unit_cost))
+                    if qty < 1:
+                        raise RiskBlocked("1회 주문금액 한도 또는 예수금 부족")
+                    side = Side.buy
+                else:
+                    # 비중 축소는 위험을 줄이는 방향이라 1회 주문금액으로 자르지 않는다.
+                    qty = min(-change, held_qty)
+                    side = Side.sell
+                out.action = side.value
+                signal.action = AgentAction(side.value)
+            elif out.action == "buy":
                 room = equity * (cfg.max_position_pct / 100) - (h.market_value if h else 0)
                 budget = min(room, cfg.max_order_amount, balance.cash)
                 qty = int(budget // quote.price)
@@ -248,7 +312,7 @@ def step_once(
                 qty = h.quantity
                 side = Side.sell
 
-            res = broker.place_order(quote.symbol, out.action, qty, quote.price, "limit")
+            res = broker.place_order(quote.symbol, side.value, qty, quote.price, "limit")
 
             # 전송이 실패했으면 '접수됨(pending)' 으로 남기지 않는다. 증권사에 없는
             # 주문이 미체결인 척 쌓이면 거래 내역도 체결 폴링도 전부 거짓이 된다.
@@ -283,6 +347,8 @@ def step_once(
                 )
             )
             signal.executed = res.ok
+            if res.ok and weight_policy:
+                _rebalanced_on[day_key] = date.today()
             if not res.ok:
                 blocked = res.message
         except RiskBlocked as e:
@@ -299,6 +365,7 @@ def step_once(
                 "currency": quote.currency,
                 "name": quote.name,
                 "action": out.action,
+                "target_weight": out.target_weight,
                 "confidence": out.confidence,
                 "q_values": out.q_values,
                 "price": quote.price,

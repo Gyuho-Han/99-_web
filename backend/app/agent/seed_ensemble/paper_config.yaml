@@ -1,0 +1,86 @@
+# 논문 4.1절 실험 설정 (auto_trading 실험28 hidden-256 multiseed, val2025 fold 와 동일)
+#
+# 학습   2018.07.26 ~ 2024.12.30 (1,582거래일)  DQN 가중치 학습
+# 검증   2025.01.02 ~ 2025.12.30 (242거래일)    시드별 에피소드 선택(누적수익률 최고)
+# 시험   2026.01.02 ~ 2026.09.11 (171거래일)    성과 평가
+# 날짜는 scripts/train_seed_ensemble.py 인자로 바꿀 수 있다.
+
+data:
+  start_date: "2018-01-01"
+  validation_start: "2025-01-01"
+  split_date: "2026-01-01"
+  end_date: "2026-09-11"
+  market: "J"
+  period: "D"
+  adjusted_price_code: "0"     # 수정주가
+
+state:
+  window: 20                   # 최근 20일
+  market_features:             # 시장 특성 15개 → 20 × 15 + 보유비중 1 = 301차원
+    ohlc:                      # 가격 4
+      - gap_return
+      - intraday_return
+      - high_low_range
+      - close_position
+    trend:                     # 추세 7
+      - close_ma5_ratio
+      - close_ma20_ratio
+      - close_ma60_ratio
+      - close_ma120_ratio
+      - ma5_ma20_ratio
+      - ma20_ma60_ratio
+      - ma60_ma120_ratio
+    momentum:                  # 모멘텀 1
+      - rsi14_norm
+    volatility:                # 변동성 1
+      - atr14_ratio
+    volume:                    # 거래량 2
+      - volume_ma20_ratio
+      - volume_change
+  portfolio_features:
+    - position_ratio           # 현재 주식 비중
+
+action:
+  type: target_position
+  values: [0.0, 0.5, 1.0]      # 목표 주식 비중. t일 종가까지 관찰 → t+1일 시가에 정수 주식 수로 체결
+
+reward:
+  type: log_return             # 비용 반영 후 자산의 일별 로그수익률
+  formula: "log(next_asset / current_asset)"
+
+environment:
+  initial_balance: 10000000    # 1,000만 원
+  commission: 0.00015          # 매수·매도 0.015%
+  tax: 0.0025                  # 매도세 0.25%
+  min_holding_days: 0          # 공매도·레버리지 없음 (PaperBroker 가 long-only, 정수 주식)
+
+agent:
+  algorithm: dqn
+  hidden_dim: 256              # 256 유닛 은닉층 2개 (ReLU)
+  optimizer: adam
+  loss: huber
+  gamma: 0.99
+  learning_rate: 0.001
+  batch_size: 32
+  replay_buffer_size: 20000
+  target_update_interval: 500  # 500회 갱신마다 타깃망 복사
+  epsilon_start: 1.0
+  epsilon_min: 0.05
+  epsilon_decay: 0.999         # 갱신마다 0.999배
+
+training:
+  episodes: 100
+  seed: 42                     # 시드별 학습 시 덮어쓴다
+  seeds: [1, 7, 21, 42, 100]
+  learning_starts: 256         # 256스텝 이후 매 스텝 학습
+  train_frequency: 1
+  gradient_steps: 1
+  torch_threads: 1
+  selection_metric: cumulative_return
+
+evaluation:
+  periods_per_year: 252
+  annual_risk_free_rate: 0.0
+
+paths:
+  model_file: dqn_model.pth

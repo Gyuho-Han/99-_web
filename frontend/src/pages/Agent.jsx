@@ -192,7 +192,7 @@ export default function Agent() {
         {/* 정책 */}
         <Card eyebrow="POLICY" title="정책 모델">
           <div className="space-y-4">
-            <Field label="사용할 정책" hint="학습한 모델은 서버에 등록하면 여기 나타납니다">
+            <Field label="사용할 정책" hint="시드 앙상블 DQN — qa: Q값 평균 · mv: 다수결 · seed-k: 단일 시드">
               <Select value={draft.model_name} onChange={(e) => set("model_name", e.target.value)}>
                 {[...new Set([draft.model_name, ...draft.available_models])].map((m) => (
                   <option key={m} value={m}>{m}</option>
@@ -228,8 +228,9 @@ export default function Agent() {
                 value={draft.confidence_threshold}
                 onChange={(e) => set("confidence_threshold", Number(e.target.value))} />
               <p className="mt-2 text-[11.5px] text-muted leading-relaxed">
-                이 값보다 낮은 신뢰도의 신호는 주문으로 나가지 않습니다. 높일수록 거래가
-                줄고 신중해집니다.
+                이 값보다 낮은 신뢰도의 신호는 주문으로 나가지 않습니다. 단, 시드 앙상블
+                DQN(목표 비중 정책)에는 적용하지 않습니다 — 논문의 결합 규칙에 임계값이 없기
+                때문입니다. 이때 신뢰도는 고른 비중에 동의한 시드 모델의 비율입니다.
               </p>
             </Field>
           </div>

@@ -1,25 +1,43 @@
-"""강화학습 정책 연결 지점.
+"""강화학습 정책 연결 지점 — 시드 앙상블 DQN (논문 구현).
 
-나중에 학습한 DQN / A2C / PPO 모델을 붙일 때는 이 파일만 건드리면 된다.
+이전의 규칙 기반 임시 정책(HeuristicPolicy · RandomPolicy)을 걷어 내고, 논문
+「시드 앙상블을 통한 DQN 주식 비중 조절의 성과 및 안정성 개선」의 정책으로 바꿨다.
 
-    class MyPPOPolicy(Policy):
-        def __init__(self, ckpt): self.net = torch.load(ckpt); self.net.eval()
-        def act(self, obs): ...  # PolicyOutput 반환
+  dqn-seed-ensemble-qa   Q값 평균 앙상블 (식 3)  ← 기본값. 논문에서 세 종목 모두 B&H보다
+                                                   수익률은 높고 MDD는 낮았던 규칙
+  dqn-seed-ensemble-mv   다수결 앙상블 (식 2, 동점이면 작은 비중)
+  dqn-seed-<k>           단일 시드 DQN (논문의 비교 기준)
 
-    register_policy("ppo-ensemble-v1", MyPPOPolicy("runs/ppo.pt"))
+정책은 '매수/매도'가 아니라 **목표 주식 비중** w ∈ {0, 0.5, 1} 을 낸다.
+러너(runner.py)가 현재 보유 수량과의 차이를 주문 수량으로 바꾼다.
 
-상태벡터(Observation)는 연구 계획에서 정한 구성을 그대로 따른다.
-OHLCV 정규화 + 기술적 지표 + 뉴스 감성 스칼라 + 에이전트 상태변수.
+모델은 종목별로 학습한다. backend/models/seed_ensemble/<종목코드>/seed-<k>/dqn_model.pth
+가 없는 종목은 관망(hold)으로 남기고 주문하지 않는다. 학습은
+`python -m scripts.train_seed_ensemble --symbol <종목코드>` 로 한다.
+
+상태벡터는 학습 때와 같다: 완결된 일봉으로 만든 시장 특성 15개 × 최근 20일 + 보유 비중.
+장중의 미완결 오늘 일봉은 넣지 않는다(논문: t일 종가까지 관찰 → t+1일 시가에 체결).
 """
 
 from __future__ import annotations
 
-import math
-import random
+import logging
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
 
 from app.brokers.base import Candle
+
+log = logging.getLogger("kairo.policy")
+
+MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "seed_ensemble"
+PAPER_SEEDS = (1, 7, 21, 42, 100)
+DEFAULT_POLICY = "dqn-seed-ensemble-qa"
+# 피처 준비(MA120)와 20일 창에 139개가 필요하다. RSI가 지수평균이라 앞쪽 이력이
+# 길수록 학습 때 값과 같아지므로 넉넉히 받는다 (250개면 차이가 1e-7 수준).
+CANDLE_LOOKBACK = 250
 
 
 # --------------------------------------------------------------------------
@@ -28,144 +46,175 @@ from app.brokers.base import Candle
 @dataclass
 class Observation:
     symbol: str
-    candles: list[Candle]          # 최근 N일 일봉 (오래된 → 최신)
+    candles: list[Candle]          # 최근 N일 일봉 (오래된 → 최신). 오늘 미완결 봉이 섞일 수 있다
     price: float                   # 현재가
     cash_ratio: float              # 현금 / 총자산
-    position_ratio: float          # 해당 종목 평가액 / 총자산
+    position_ratio: float          # 해당 종목 평가액 / 총자산 (현재가 기준)
     unrealized_pct: float          # 해당 종목 평가손익률(%)
-    sentiment: float = 0.0         # KR-FinBert-SC 극성 스칼라 s_t ∈ [-1, 1]
-    features: dict[str, float] = field(default_factory=dict)  # 기술적 지표
+    sentiment: float = 0.0         # 논문 정책은 쓰지 않는다 (상태에 감성 피처 없음)
+    features: dict[str, float] = field(default_factory=dict)
+    quantity: int = 0              # 해당 종목 보유 수량
+    equity: float = 0.0            # 총자산 (현재가 기준)
 
 
 @dataclass
 class PolicyOutput:
     action: str                    # "buy" | "hold" | "sell"
-    confidence: float              # 0~1
+    confidence: float              # 0~1. 앙상블은 선택 행동에 동의한 모델 비율
     q_values: dict[str, float]     # {"buy":.., "hold":.., "sell":..}
     reason: str = ""
+    # 목표 비중 정책이면 0~1. None 이면 action 만 보고 주문한다(예전 방식).
+    target_weight: float | None = None
 
 
 class Policy(ABC):
     """모든 정책이 구현해야 하는 계약."""
 
     name: str = "policy"
+    candle_lookback: int = CANDLE_LOOKBACK
 
     @abstractmethod
     def act(self, obs: Observation) -> PolicyOutput: ...
 
 
 # --------------------------------------------------------------------------
-# 기술적 지표 (상태벡터 구성용)
+# 시드 앙상블 DQN
 # --------------------------------------------------------------------------
-def compute_features(candles: list[Candle]) -> dict[str, float]:
-    closes = [c.close for c in candles]
-    if len(closes) < 30:
-        return {}
+class _EnsembleCache:
+    """종목별 모델 묶음을 한 번만 읽는다. 파일이 새로 생기면 다음 호출에서 읽는다."""
 
-    def sma(n: int) -> float:
-        return sum(closes[-n:]) / n
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self._lock = threading.Lock()
+        self._loaded: dict[str, tuple[tuple, object]] = {}
 
-    def ema(n: int) -> float:
-        k = 2 / (n + 1)
-        v = closes[-n]
-        for p in closes[-n + 1:]:
-            v = p * k + v * (1 - k)
-        return v
+    def _fingerprint(self, symbol: str) -> tuple:
+        files = sorted((self.root / symbol).glob("seed-*/dqn_model.pth"))
+        return tuple((p.parent.name, p.stat().st_mtime_ns) for p in files)
 
-    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
-    gains = [d for d in deltas[-14:] if d > 0]
-    losses = [-d for d in deltas[-14:] if d < 0]
-    avg_gain = sum(gains) / 14 if gains else 0.0
-    avg_loss = sum(losses) / 14 if losses else 1e-9
-    rsi = 100 - 100 / (1 + avg_gain / avg_loss)
+    def get(self, symbol: str):
+        from app.agent.seed_ensemble.ensemble import SeedEnsemble
 
-    macd = ema(12) - ema(26)
-    mean20 = sma(20)
-    std20 = math.sqrt(sum((c - mean20) ** 2 for c in closes[-20:]) / 20)
-    bb_pos = (closes[-1] - mean20) / (2 * std20) if std20 else 0.0
-
-    rets = [deltas[i] / closes[i] for i in range(-20, -1)]
-    volatility = math.sqrt(sum(r * r for r in rets) / len(rets)) * math.sqrt(252) * 100
-
-    return {
-        "sma5": sma(5),
-        "sma20": mean20,
-        "sma60": sma(60) if len(closes) >= 60 else mean20,
-        "rsi14": rsi,
-        "macd": macd,
-        "bb_pos": bb_pos,
-        "volatility": volatility,
-        "momentum": (closes[-1] / closes[-10] - 1) * 100 if len(closes) >= 10 else 0.0,
-    }
+        stamp = self._fingerprint(symbol)
+        if not stamp:
+            return None
+        with self._lock:
+            hit = self._loaded.get(symbol)
+            if hit and hit[0] == stamp:
+                return hit[1]
+            ensemble = SeedEnsemble.load(self.root / symbol)
+            self._loaded[symbol] = (stamp, ensemble)
+            log.info("시드 앙상블 모델을 읽었습니다: %s seeds=%s", symbol, ensemble.seeds)
+            return ensemble
 
 
-# --------------------------------------------------------------------------
-# 베이스라인 정책 (모델 연결 전 임시)
-# --------------------------------------------------------------------------
-class HeuristicPolicy(Policy):
-    """이동평균 교차 + RSI + 감성 점수를 섞은 규칙 기반 임시 정책.
+_cache = _EnsembleCache(MODELS_DIR)
 
-    학습된 강화학습 모델이 붙기 전까지 파이프라인 전체를 돌려 보기 위한 것으로,
-    성능 기준선(baseline) 이상의 의미는 없다.
-    """
 
-    name = "heuristic-baseline"
+def completed_candles(candles: list[Candle], today: date | None = None) -> list[Candle]:
+    """오늘 날짜 봉(장중이면 미완결)을 뺀다. 결정은 직전 거래일 종가까지의 정보로 한다."""
+    cutoff = (today or date.today()).isoformat()
+    return [c for c in candles if c.date < cutoff]
+
+
+def _hold(reason: str) -> PolicyOutput:
+    return PolicyOutput("hold", 0.0, {"buy": 0.0, "hold": 0.0, "sell": 0.0}, reason)
+
+
+class SeedEnsemblePolicy(Policy):
+    """rule: 'qa' | 'mv' | 'single'(seed 지정)."""
+
+    def __init__(self, rule: str, seed: int | None = None, cache: _EnsembleCache = _cache):
+        self.rule = rule
+        self.seed = seed
+        self.cache = cache
+        self.name = (
+            f"dqn-seed-{seed}" if rule == "single" else f"dqn-seed-ensemble-{rule}"
+        )
 
     def act(self, obs: Observation) -> PolicyOutput:
-        f = obs.features or compute_features(obs.candles)
-        if not f:
-            return PolicyOutput("hold", 0.0, {"buy": 0, "hold": 1, "sell": 0}, "데이터 부족")
+        try:
+            ensemble = self.cache.get(obs.symbol)
+        except ImportError as e:
+            return _hold(f"시드 앙상블 의존성 미설치 ({e.name}) — pip install -r requirements.txt")
+        except Exception as e:  # noqa: BLE001 — 체크포인트 문제는 주문 대신 관망으로
+            log.exception("시드 앙상블 모델 로드 실패 %s", obs.symbol)
+            return _hold(f"모델 로드 실패: {e}")
+        if ensemble is None:
+            return _hold(f"{obs.symbol} 학습된 모델 없음 (models/seed_ensemble/{obs.symbol})")
+        if self.rule == "single" and self.seed not in ensemble.seeds:
+            return _hold(f"{obs.symbol} seed-{self.seed} 모델 없음")
 
-        score = 0.0
-        notes: list[str] = []
+        import pandas as pd
 
-        if f["sma5"] > f["sma20"]:
-            score += 0.9
-            notes.append("5일선이 20일선 위")
+        from app.agent.seed_ensemble.ensemble import RULE_LABEL
+
+        candles = completed_candles(obs.candles)
+        if len(candles) < ensemble.min_candles:
+            return _hold(f"완결 일봉 부족 ({len(candles)} < {ensemble.min_candles})")
+        last_close = candles[-1].close
+
+        # 보유 비중은 학습과 같이 '직전 종가' 기준으로 다시 잰다 (env: shares × close[t] / asset).
+        position = obs.position_ratio
+        if obs.equity > 0 and last_close > 0:
+            held_now = obs.position_ratio * obs.equity   # 잔고 평가액 (총자산과 같은 가격 기준)
+            held_prev = obs.quantity * last_close
+            asset_prev = obs.equity - held_now + held_prev
+            if asset_prev > 0:
+                position = held_prev / asset_prev
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "date": c.date,
+                    "open": c.open,
+                    "high": c.high,
+                    "low": c.low,
+                    "close": c.close,
+                    "volume": c.volume,
+                }
+                for c in candles
+            ]
+        )
+        try:
+            state = ensemble.live_state(frame, position)
+            decision = ensemble.decide(state, self.rule, self.seed)
+        except ValueError as e:
+            return _hold(str(e))
+
+        weights = ensemble.action_values
+        q = (
+            decision.q_values[ensemble.seeds.index(self.seed)]
+            if self.rule == "single"
+            else decision.mean_q
+        )
+        q_by_weight = dict(zip(weights, (float(v) for v in q)))
+        target = decision.target_weight
+        if target > position + 1e-9:
+            action = "buy"
+        elif target < position - 1e-9:
+            action = "sell"
         else:
-            score -= 0.9
-            notes.append("5일선이 20일선 아래")
+            action = "hold"
 
-        if f["rsi14"] < 32:
-            score += 1.1
-            notes.append(f"RSI {f['rsi14']:.0f} 과매도")
-        elif f["rsi14"] > 70:
-            score -= 1.1
-            notes.append(f"RSI {f['rsi14']:.0f} 과매수")
-
-        score += max(-0.8, min(0.8, -f["bb_pos"] * 0.7))
-        score += obs.sentiment * 0.6
-        if abs(obs.sentiment) > 0.3:
-            notes.append(f"뉴스 감성 {obs.sentiment:+.2f}")
-
-        # 리스크 상태변수 반영: 이미 비중이 크면 추가 매수를 억제
-        if obs.position_ratio > 0.4:
-            score -= 0.7
-            notes.append("보유 비중 과다")
-        if obs.unrealized_pct < -7:
-            score -= 0.6
-            notes.append(f"평가손실 {obs.unrealized_pct:.1f}%")
-
-        q = {
-            "buy": round(score, 3),
-            "hold": 0.25,
-            "sell": round(-score, 3),
-        }
-        action = max(q, key=q.get)
-        spread = max(q.values()) - sorted(q.values())[-2]
-        confidence = round(min(0.99, 1 / (1 + math.exp(-spread * 1.6))), 3)
-        return PolicyOutput(action, confidence, q, " · ".join(notes[:3]))
-
-
-class RandomPolicy(Policy):
-    """무작위 정책. 성능 비교 대조군."""
-
-    name = "random"
-
-    def act(self, obs: Observation) -> PolicyOutput:
-        q = {k: round(random.uniform(-1, 1), 3) for k in ("buy", "hold", "sell")}
-        action = max(q, key=q.get)
-        return PolicyOutput(action, round(random.uniform(0.4, 0.8), 3), q, "무작위 선택")
+        votes = " ".join(f"{w:.0%}:{v}" for w, v in zip(weights, decision.votes))
+        reason = (
+            f"{RULE_LABEL[self.rule]} 목표비중 {target:.0%} (현재 {position:.0%}) · "
+            f"득표 {votes} · 기준일 {candles[-1].date}"
+        )
+        return PolicyOutput(
+            action=action,
+            # 선택된 비중과 같은 비중을 고른 시드 모델의 비율 (단일 시드도 같은 정의)
+            confidence=round(decision.agreement, 3),
+            # 화면의 세 칸(q_buy · q_hold · q_sell)에 Q(100%) · Q(50%) · Q(0%) 를 싣는다.
+            q_values={
+                "buy": round(q_by_weight.get(1.0, 0.0), 6),
+                "hold": round(q_by_weight.get(0.5, 0.0), 6),
+                "sell": round(q_by_weight.get(0.0, 0.0), 6),
+            },
+            reason=reason,
+            target_weight=target,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -179,14 +228,15 @@ def register_policy(name: str, policy: Policy) -> None:
 
 
 def get_policy(name: str) -> Policy:
-    return _REGISTRY.get(name, _REGISTRY["heuristic-baseline"])
+    # 예전 설정값(heuristic-baseline, ppo-ensemble-v0 등)은 기본 정책으로 돌린다.
+    return _REGISTRY.get(name, _REGISTRY[DEFAULT_POLICY])
 
 
 def list_policies() -> list[str]:
     return list(_REGISTRY)
 
 
-register_policy("heuristic-baseline", HeuristicPolicy())
-register_policy("random", RandomPolicy())
-# 학습된 모델은 여기에 추가로 등록한다.
-# register_policy("ppo-ensemble-v1", PPOPolicy("checkpoints/ppo_ensemble.pt"))
+register_policy("dqn-seed-ensemble-qa", SeedEnsemblePolicy("qa"))
+register_policy("dqn-seed-ensemble-mv", SeedEnsemblePolicy("mv"))
+for _seed in PAPER_SEEDS:
+    register_policy(f"dqn-seed-{_seed}", SeedEnsemblePolicy("single", _seed))

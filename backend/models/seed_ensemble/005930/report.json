@@ -1,0 +1,164 @@
+{
+  "symbol": "005930",
+  "seeds": [
+    1,
+    7,
+    21,
+    42,
+    100
+  ],
+  "data": {
+    "start_date": "2018-01-01",
+    "validation_start": "2025-01-01",
+    "split_date": "2026-01-01",
+    "end_date": "2026-09-11",
+    "market": "J",
+    "period": "D",
+    "adjusted_price_code": "0"
+  },
+  "table2": {
+    "single": {
+      "1": {
+        "cumulative_return": 1.3217232485000001,
+        "mdd": 0.3968730689411123,
+        "sharpe_ratio": 1.8848160929569016,
+        "average_position": 0.9362833870495876,
+        "turnover": 5.606587211789176
+      },
+      "7": {
+        "cumulative_return": 1.5047302485,
+        "mdd": 0.42865346022924256,
+        "sharpe_ratio": 2.007980666834615,
+        "average_position": 0.9312441858371502,
+        "turnover": 7.9556666807736605
+      },
+      "21": {
+        "cumulative_return": 0.2870464990000001,
+        "mdd": 0.24088790996260168,
+        "sharpe_ratio": 1.1490955309588724,
+        "average_position": 0.2924126601484936,
+        "turnover": 14.297345945542235
+      },
+      "42": {
+        "cumulative_return": 0.6507254134999998,
+        "mdd": 0.29124405789518937,
+        "sharpe_ratio": 1.6784962485335408,
+        "average_position": 0.48179287023394524,
+        "turnover": 19.243157647996263
+      },
+      "100": {
+        "cumulative_return": 1.1238021285000004,
+        "mdd": 0.415605574711699,
+        "sharpe_ratio": 1.7127197905334905,
+        "average_position": 0.9690122342634117,
+        "turnover": 7.038247138402755
+      }
+    },
+    "single_mean": {
+      "cumulative_return": 0.9776055076000001,
+      "mdd": 0.35465281434796897,
+      "sharpe_ratio": 1.686621665963484,
+      "average_position": 0.7221490675065176,
+      "turnover": 10.828200924900816
+    },
+    "mv": {
+      "cumulative_return": 1.2294672085,
+      "mdd": 0.42865346022924256,
+      "sharpe_ratio": 1.808523048005857,
+      "average_position": 0.9368230596383575,
+      "turnover": 7.058214351792849
+    },
+    "qa": {
+      "cumulative_return": 1.2116118710000001,
+      "mdd": 0.42865346022924256,
+      "sharpe_ratio": 1.799596343475719,
+      "average_position": 0.9486137808373153,
+      "turnover": 6.106144100252541
+    },
+    "buy_and_hold": {
+      "cumulative_return": 1.1560403509999997,
+      "mdd": 0.42865346022924256,
+      "sharpe_ratio": 1.736281044265618,
+      "average_position": 0.9987957913689695,
+      "turnover": 0.99766
+    },
+    "qa_unanimous_day_ratio": 0.06432748538011696,
+    "test_first_execution": "2026-01-02",
+    "test_last_execution": "2026-09-11",
+    "test_steps": 171
+  },
+  "table3": [
+    {
+      "rule": "mv",
+      "k": 1,
+      "combinations": 5,
+      "min": 0.2870464990000001,
+      "mean": 0.9776055076000001,
+      "std": 0.50034320828583
+    },
+    {
+      "rule": "mv",
+      "k": 3,
+      "combinations": 10,
+      "min": 0.2789506595000002,
+      "mean": 1.0147911125500002,
+      "std": 0.48406246190833757
+    },
+    {
+      "rule": "mv",
+      "k": 4,
+      "combinations": 5,
+      "min": 0.785488621,
+      "mean": 0.9574644450000003,
+      "std": 0.15711641188804149
+    },
+    {
+      "rule": "mv",
+      "k": 5,
+      "combinations": 1,
+      "min": 1.2294672085,
+      "mean": 1.2294672085,
+      "std": 0.0
+    },
+    {
+      "rule": "qa",
+      "k": 1,
+      "combinations": 5,
+      "min": 0.2870464990000001,
+      "mean": 0.9776055076000001,
+      "std": 0.50034320828583
+    },
+    {
+      "rule": "qa",
+      "k": 2,
+      "combinations": 10,
+      "min": 0.7913978520000002,
+      "mean": 1.1707034355000001,
+      "std": 0.28084264691682337
+    },
+    {
+      "rule": "qa",
+      "k": 3,
+      "combinations": 10,
+      "min": 1.0187606735,
+      "mean": 1.2373287318000004,
+      "std": 0.1350372980570374
+    },
+    {
+      "rule": "qa",
+      "k": 4,
+      "combinations": 5,
+      "min": 1.0475696685000004,
+      "mean": 1.2015044794999998,
+      "std": 0.12935482537429543
+    },
+    {
+      "rule": "qa",
+      "k": 5,
+      "combinations": 1,
+      "min": 1.2116118710000001,
+      "mean": 1.2116118710000001,
+      "std": 0.0
+    }
+  ]
+}

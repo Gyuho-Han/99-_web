@@ -7,3 +7,9 @@ email-validator>=2.1
 cryptography>=42
 httpx>=0.27
 PyJWT>=2.8
+# 시드 앙상블 DQN (auto_trading/backend/requirements.txt 와 같은 범위)
+numpy>=1.26,<3
+pandas>=2.2,<3
+torch>=2.6,<3
+PyYAML>=6,<7
+requests>=2.31,<3

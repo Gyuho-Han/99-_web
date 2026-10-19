@@ -71,6 +71,8 @@ need = {
     "pydantic": "pydantic", "pydantic_settings": "pydantic-settings",
     "email_validator": "email-validator", "cryptography": "cryptography",
     "httpx": "httpx", "jwt": "PyJWT",
+    # 시드 앙상블 DQN 정책
+    "numpy": "numpy", "pandas": "pandas", "torch": "torch", "yaml": "PyYAML",
 }
 missing = [pkg for mod, pkg in need.items() if u.find_spec(mod) is None]
 if missing:

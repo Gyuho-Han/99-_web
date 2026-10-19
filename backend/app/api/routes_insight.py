@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session
 
-from app.agent.policy import list_policies
+from app.agent.policy import DEFAULT_POLICY, list_policies
 from app.agent.runner import step_once
 from app.api.deps import current_user, env_param, market_param
 from app.brokers.factory import is_live_broker
@@ -116,6 +116,11 @@ def _cfg(db: Session, user_id: int, env: Env, market: Market) -> AgentConfig:
         db.add(cfg)
         db.commit()
         db.refresh(cfg)
+    elif cfg.model_name not in list_policies():
+        # 규칙 기반 임시 정책(heuristic-baseline 등)을 걷어 냈다. 예전 설정은 기본 정책으로 바꾼다.
+        cfg.model_name = DEFAULT_POLICY
+        db.commit()
+        db.refresh(cfg)
     return cfg
 
 
@@ -162,6 +167,8 @@ def update_agent_config(
 ):
     cfg = _cfg(db, user.id, env, mkt)
     data = payload.model_dump(exclude_none=True)
+    if "model_name" in data and data["model_name"] not in list_policies():
+        raise HTTPException(422, f"알 수 없는 정책 모델입니다: {data['model_name']}")
 
     # 리스크 한도 확인. 켤 때만 본다. 끄는 것은 언제나 막지 않는다.
     turning_on = data.get("enabled") is True and not cfg.enabled

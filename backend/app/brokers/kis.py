@@ -233,11 +233,13 @@ class KISBroker(BrokerAdapter):
             ts=datetime.now(),
         )
 
-    def get_candles(self, symbol: str, days: int = 120) -> list[Candle]:
-        # KIS 일봉 API는 1회 요청당 100건이 상한이다. 그 이상은 구간을 나눠
-        # 여러 번 호출해야 하므로, 여기서는 최근 100영업일까지만 돌려준다.
-        end = date.today()
-        start = end - timedelta(days=int(min(days, 100) * 1.6) + 10)
+    # KIS 일봉 API는 1회 요청당 100건이 상한이다. 시드 앙상블 DQN의 상태는
+    # MA120 + 최근 20일 창을 쓰므로 최소 139개 완결 일봉이 필요하다. 그래서
+    # auto_trading/data/loader.py 와 같은 방식으로 구간을 과거로 넘기며 여러 번 호출한다.
+    _CANDLE_PAGE = 100
+    _CANDLE_PAGE_SLEEP = 0.55  # 모의투자 초당 호출 제한(2건/초)보다 느리게
+
+    def _candle_page(self, symbol: str, start: date, end: date) -> list[dict]:
         res = self._client.get(
             "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
             headers=self._headers(self._tr("candles")),
@@ -247,27 +249,51 @@ class KISBroker(BrokerAdapter):
                 "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
                 "FID_INPUT_DATE_2": end.strftime("%Y%m%d"),
                 "FID_PERIOD_DIV_CODE": "D",
-                "FID_ORG_ADJ_PRC": "0",  # 0=수정주가
+                "FID_ORG_ADJ_PRC": "0",  # 0=수정주가 (논문 학습 데이터와 같은 기준)
             },
         )
         res.raise_for_status()
         body = res.json()
         if body.get("rt_cd") not in (None, "0"):
             raise BrokerError(body.get("msg1") or "일봉 조회에 실패했습니다.")
-        rows = body.get("output2") or []
-        candles = [
-            Candle(
-                date=datetime.strptime(r["stck_bsop_date"], "%Y%m%d").date().isoformat(),
-                open=_num(r.get("stck_oprc")),
-                high=_num(r.get("stck_hgpr")),
-                low=_num(r.get("stck_lwpr")),
-                close=_num(r.get("stck_clpr")),
-                volume=int(_num(r.get("acml_vol"))),
-            )
-            for r in rows
-            if r.get("stck_bsop_date") and _num(r.get("stck_clpr")) > 0
-        ]
-        candles.sort(key=lambda c: c.date)
+        return body.get("output2") or []
+
+    def get_candles(self, symbol: str, days: int = 120) -> list[Candle]:
+        days = max(1, int(days))
+        end = date.today()
+        # 영업일 days개를 담을 만큼 넉넉한 달력 구간 (주말·휴일 고려 1.6배 + 여유)
+        start = end - timedelta(days=int(days * 1.6) + 10)
+        by_date: dict[str, Candle] = {}
+        cursor = end
+        while len(by_date) < days and cursor >= start:
+            try:
+                rows = self._candle_page(symbol, start, cursor)
+            except Exception:
+                if not by_date:
+                    raise
+                break  # 앞 페이지는 받았으면 받은 만큼 돌려준다 (부족하면 정책이 관망 처리)
+            page_dates: list[str] = []
+            for r in rows:
+                raw = r.get("stck_bsop_date")
+                if not raw:
+                    continue
+                page_dates.append(raw)
+                if _num(r.get("stck_clpr")) <= 0:
+                    continue
+                d = datetime.strptime(raw, "%Y%m%d").date().isoformat()
+                by_date[d] = Candle(
+                    date=d,
+                    open=_num(r.get("stck_oprc")),
+                    high=_num(r.get("stck_hgpr")),
+                    low=_num(r.get("stck_lwpr")),
+                    close=_num(r.get("stck_clpr")),
+                    volume=int(_num(r.get("acml_vol"))),
+                )
+            if not page_dates or len(rows) < self._CANDLE_PAGE:
+                break
+            cursor = datetime.strptime(min(page_dates), "%Y%m%d").date() - timedelta(days=1)
+            time.sleep(self._CANDLE_PAGE_SLEEP)
+        candles = sorted(by_date.values(), key=lambda c: c.date)
         return candles[-days:]
 
     def get_balance(self) -> Balance:

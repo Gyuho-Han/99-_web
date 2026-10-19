@@ -121,10 +121,11 @@ function Legend({ color, label }) {
 }
 
 function SignalTooltip({ s }) {
+  // 시드 앙상블 DQN은 목표 비중 {100%, 50%, 0%} 의 Q값(앙상블이면 시드 평균)을 싣는다.
   const q = [
-    ["매수", s.q_buy, "var(--up)"],
-    ["관망", s.q_hold, "var(--muted)"],
-    ["매도", s.q_sell, "var(--down)"],
+    ["Q 비중100%", s.q_buy, "var(--up)"],
+    ["Q 비중50%", s.q_hold, "var(--muted)"],
+    ["Q 비중0%", s.q_sell, "var(--down)"],
   ];
   const span = Math.max(1, ...q.map(([, v]) => Math.abs(v)));
 
