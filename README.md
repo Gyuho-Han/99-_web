@@ -2,8 +2,9 @@
 
 한국투자증권 KIS Open API와 연결되는 자동매매 시스템입니다. **국내주식과 미국주식**을
 상단 시장 토글 하나로 오가며, 두 시장의 자격증명·포지션·주문·설정·성과가 완전히 분리됩니다. 학습한 강화학습 정책을
-서버에 등록하면 바로 실거래 파이프라인에 올라갑니다. 지금은 정책 자리에 규칙 기반
-베이스라인이 들어가 있고, 증권사 자격증명이 없어도 내장 시뮬레이터로 전체 흐름이 돕니다.
+서버에 등록하면 바로 실거래 파이프라인에 올라갑니다. 이 복사본(kairo-seed-ensemble)은 정책 자리에
+논문 「시드 앙상블을 통한 DQN 주식 비중 조절의 성과 및 안정성 개선」의 **시드 앙상블 DQN**이
+들어가 있고, 증권사 자격증명이 없어도 내장 시뮬레이터로 전체 흐름이 돕니다.
 
 ```
 시세 조회 → 상태벡터 구성 → 정책 추론 → 리스크 게이트 → 주문 전송 → 체결·손익 기록
@@ -309,50 +310,73 @@ cd backend && python scripts/check_kis.py us NVDA     # 종목 지정
 
 ---
 
-## 강화학습 모델 붙이기
+## 정책: 시드 앙상블 DQN (논문 구현)
 
-`backend/app/agent/policy.py` 한 파일만 건드리면 됩니다.
+규칙 기반 임시 정책(heuristic-baseline · random)은 걷어 냈습니다. 정책은
+[su08035-ops/auto_trading](https://github.com/su08035-ops/auto_trading/tree/main/backend) 의
+backend 에서 **논문에 쓰인 부분만** 가져와 `backend/app/agent/seed_ensemble/` 에 두었습니다.
 
-```python
-class PPOEnsemblePolicy(Policy):
-    name = "ppo-ensemble-v1"
+| 정책 이름 | 규칙 |
+|---|---|
+| `dqn-seed-ensemble-qa` (기본) | Q값 평균: `argmax_a (1/K) Σ_k Q_k(s,a)` — 식 (3) |
+| `dqn-seed-ensemble-mv` | 다수결: 최다 득표 행동, 동점이면 목표 비중이 작은 행동 — 식 (2) |
+| `dqn-seed-1` · `-7` · `-21` · `-42` · `-100` | 단일 시드 DQN (논문의 비교 기준) |
 
-    def __init__(self, ckpt):
-        self.net = torch.load(ckpt); self.net.eval()
+| 항목 | 설정 (`seed_ensemble/paper_config.yaml`) |
+|---|---|
+| 상태 | 시장 특성 15개(가격 4·추세 7·모멘텀 1·변동성 1·거래량 2) × 최근 20일 + 보유 비중 = 301 |
+| 행동 | 목표 주식 비중 {0, 0.5, 1} |
+| 보상 | 비용 반영 자산의 일별 로그수익률 (수수료 0.015%, 매도세 0.25%) |
+| DQN | 256×2 MLP(ReLU), Adam 1e-3, Huber, γ 0.99, 배치 32, 버퍼 20,000, 타깃 500회, ε 1.0→0.05 (×0.999) |
+| 학습 | 100 에피소드, 시드 {1, 7, 21, 42, 100}, 시드마다 검증 누적수익률 최고 에피소드 선택 |
 
-    def act(self, obs: Observation) -> PolicyOutput:
-        x = build_state_vector(obs)          # OHLCV + 지표 + 감성 + 에이전트 상태
-        logits = self.net(x)
-        probs = softmax(logits)
-        action = ["buy", "hold", "sell"][int(probs.argmax())]
-        return PolicyOutput(
-            action=action,
-            confidence=float(probs.max()),
-            q_values=dict(zip(["buy", "hold", "sell"], logits.tolist())),
-            reason="PPO ensemble",
-        )
+가져오지 않은 것: Double DQN, 하이퍼파라미터 탐색용 walk-forward 도구, 실험 결과 폴더,
+`real_broker`(KAIRO의 KIS 어댑터가 대신함), 합성 데이터 생성기, 원본 프론트엔드.
+결합 규칙(MV · QA)과 표 2 · 표 3 평가는 원본 저장소에 없어 논문 3장대로 새로 썼습니다.
 
-register_policy("ppo-ensemble-v1", PPOEnsemblePolicy("checkpoints/ppo.pt"))
+**모델은 종목별입니다.** `backend/models/seed_ensemble/<종목코드>/seed-<k>/dqn_model.pth`
+가 없는 종목은 관망으로 기록하고 주문하지 않습니다. 학습은 `backend` 폴더에서:
+
+```bash
+# 받아 둔 CSV로 (date, open, high, low, close, volume — 수정주가)
+python -m scripts.train_seed_ensemble --symbol 005930 --csv path/to/ohlcv.csv --jobs 2
+# KIS에서 직접 받아서 (주문은 내지 않음)
+KIS_APP_KEY=... KIS_APP_SECRET=... python -m scripts.train_seed_ensemble --symbol 000660 --jobs 2
+# 저장된 모델로 표 2 · 표 3만 다시 계산
+python -m scripts.train_seed_ensemble --symbol 005930 --evaluate-only
 ```
 
-등록하면 에이전트 화면의 정책 선택 드롭다운에 자동으로 나타납니다.
+결과 표는 같은 폴더의 `report.md` 에 남습니다. 점검은 `python scripts/check_seed_ensemble.py`.
 
-**`Observation`이 넘겨 주는 것**
+**들어 있는 모델: 삼성전자(005930)** — auto_trading 저장소의 실험28 일봉(2018.01.02~2026.09.11,
+데이터 해시 논문 실행과 동일)으로 시드 5개를 다시 학습한 것입니다. 원본 저장소에는 `.pth` 가
+없고, 학습이 플랫폼(맥 vs 리눅스)의 부동소수점 차이에 민감해 같은 코드·시드여도 가중치가
+논문 실행과 같지 않습니다. 2026 시험 구간 결과:
 
-| 필드 | 내용 |
-|---|---|
-| `candles` | 최근 N일 일봉 (오래된 → 최신) |
-| `price` | 현재가 |
-| `cash_ratio`, `position_ratio`, `unrealized_pct` | 에이전트 상태변수 |
-| `sentiment` | 뉴스 감성 극성 스칼라 `s_t ∈ [-1, 1]` — **아직 0으로 고정** |
-| `features` | SMA5/20/60, RSI14, MACD, 볼린저 위치, 변동성, 모멘텀 |
+| 전략 | 이 모델 수익률 / MDD / 샤프 | 논문 표 2 |
+|---|---|---|
+| 단일(평균) | 97.76% / 35.47% / 1.69 | 90.41% / 38.97% / 1.59 |
+| 다수결(MV) | 122.95% / 42.87% / 1.81 | 132.18% / 42.73% / 1.86 |
+| Q값 평균(QA) | 121.16% / 42.87% / 1.80 | 156.02% / 33.67% / 2.09 |
+| B&H | 115.60% / 42.87% / 1.74 | 115.60% / 42.87% / 1.74 |
 
-감성 값은 `app/agent/runner.py`의 `sentiment=0.0` 자리에 KR-FinBert-SC 일별 집계값을
-넣으면 됩니다 (`# TODO` 표시). 네이버 검색 API로 당일 기사를 모으고, 문장 단위로
-분리해 추론한 뒤 평균이나 가중합으로 하나의 스칼라를 만들어 주입하는 흐름입니다.
+논문 실행의 원래 체크포인트가 있으면 `seed-<k>/dqn_model.pth` 자리에 넣기만 하면 됩니다.
 
-**스케일러 주의**: 정규화 파라미터는 학습 구간에서만 적합시켜야 합니다. 추론 시점에
-전체 구간 통계를 쓰면 lookahead bias가 들어갑니다.
+**실시간 동작**
+
+- 상태는 **완결된 일봉**으로만 만듭니다. 장중 오늘 봉은 버립니다 (논문: t일 종가까지 관찰 →
+  t+1일 시가에 체결). KIS 일봉 100건 제한은 구간을 나눠 여러 번 호출해 250개를 받습니다.
+- 보유 비중은 학습 환경과 같이 직전 종가 기준으로 다시 잽니다.
+- 주문 수량 = `floor(목표비중 × 총자산 ÷ 현재가) − 보유 수량`. 종목마다 **하루 한 번**만
+  리밸런싱합니다.
+- 신뢰도는 고른 비중에 동의한 시드 모델의 비율입니다. 논문 규칙에 임계값이 없으므로
+  목표 비중 정책에는 `confidence_threshold` 를 적용하지 않습니다.
+- 신호의 `q_buy · q_hold · q_sell` 칸에는 Q(비중 100%) · Q(50%) · Q(0%) 가 (앙상블이면 시드 평균) 실립니다.
+- 논문과 같은 비중으로 운용하려면 리스크 한도의 **종목당 최대 비중**과 **1회 주문금액**을
+  계좌 규모에 맞게 올려야 합니다. 기본값(30%, 200만 원)에서는 목표 100%가 30%로 잘리고,
+  큰 매수는 하루 한 번씩 나눠 들어갑니다.
+- 논문은 종목 하나를 계좌 하나로 운용했습니다. 여러 종목을 함께 켜면 각 종목이 총자산 기준
+  목표 비중을 따로 내므로, 종목당 최대 비중 한도로 합계를 관리하세요.
 
 ---
 
@@ -364,12 +388,14 @@ register_policy("ppo-ensemble-v1", PPOEnsemblePolicy("checkpoints/ppo.pt"))
 2. 실계좌 잠금 (`ALLOW_LIVE_TRADING`) — 라우터에 이어 여기서 한 번 더 본다
 3. 리스크 한도 확인 여부 (`risk_ack_at`)
 4. 거래 시간 (`trading_start` ~ `trading_end`)
-5. 신뢰도 ≥ `confidence_threshold`
+5. 신뢰도 ≥ `confidence_threshold` (목표 비중 정책에는 미적용)
 6. 일일 손실 한도 미도달
 7. **같은 종목에 미체결 주문 없음**
 8. **직전 주문 이후 `order_cooldown_seconds` 경과**
 9. **오늘 주문 건수 < `max_daily_orders`**
 10. 종목당 비중 한도 · 1회 주문금액 한도 · 예수금
+
+목표 비중 정책은 여기에 **종목당 하루 한 번 리밸런싱**이 더해집니다.
 
 하나라도 걸리면 **신호는 기록하되 주문은 내지 않습니다** (`executed=False`, `reason`에
 차단 사유 기록). 대시보드의 신호 테이프에서 임계선 아래의 흐린 막대가 바로 그것입니다.
@@ -495,7 +521,9 @@ backend/
                 market(실시세+캐시) · hybrid(실시세+모의체결) · mock · factory
                 overlay(계좌 어댑터 + 공용 시세)
     db/         session · migrate(market 축 마이그레이션)
-    agent/      policy(모델 연결 지점) · runner(리스크 게이트 + 루프)
+    agent/      policy(시드 앙상블 DQN 등록) · runner(리스크 게이트 + 루프)
+      seed_ensemble/  논문 알고리즘 (DQN · 환경 · 피처 · MV/QA 결합 · 평가)
+  models/seed_ensemble/<종목코드>/seed-<k>/dqn_model.pth  학습된 시드 모델
     services/   metrics · seed · fills(미체결 주문 체결 반영)
     api/        auth · credentials · trading · insight · connection(연결 상태·비상정지)
 frontend/
@@ -509,13 +537,14 @@ frontend/
 
 ## 남은 일
 
-- [ ] KIS 일봉 100건 제한 우회 (구간 분할 호출) — 국내·미국 모두 최근 100영업일까지
+- [x] KIS 국내 일봉 100건 제한 우회 (구간 분할 호출) — 미국은 아직 최근 100영업일까지
 - [ ] 미국 실시간시세 이용 신청 후 지연시세 여부 확인
 - [ ] USD/KRW 환율 조회를 붙여 두 시장 합산 평가금액 표시
 - [ ] KR-FinBert-SC 감성 파이프라인을 `sentiment` 필드에 연결
 - [ ] 일별 `EquitySnapshot` 자동 적재 스케줄러 (현재는 시드만 존재)
 - [ ] 체결된 매도 주문의 실현손익·수수료 채우기 (증권사 체결내역 기준 취득단가 필요)
-- [ ] 학습한 PPO/DQN 체크포인트 등록
+- [x] 시드 앙상블 DQN 체크포인트 등록 (005930)
+- [ ] 000660 · 069500 시드 모델 학습 (`scripts/train_seed_ensemble.py`)
 - [ ] 실계좌 투입 전 모의투자에서 최소 수 주 이상 검증
 
 ---
